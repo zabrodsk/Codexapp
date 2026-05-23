@@ -18,6 +18,9 @@ from assistant_scheduler_health import (
     EMAIL_TRIAGE_DIRECT_PROGRAM_ARGUMENTS,
     EMAIL_TRIAGE_SSH_BRIDGE_PROGRAM_ARGUMENTS,
     JOB_REGISTRY,
+    TASK_SPINE_DIRECT_PROGRAM_ARGUMENTS,
+    TASK_SPINE_SPEC,
+    TASK_SPINE_SSH_BRIDGE_PROGRAM_ARGUMENTS,
     TRAINING_CALENDAR_DIRECT_PROGRAM_ARGUMENTS,
     TRAINING_CALENDAR_BOOKING_SPEC,
     TRAINING_CALENDAR_SSH_BRIDGE_PROGRAM_ARGUMENTS,
@@ -302,6 +305,67 @@ def test_email_triage_health_reports_ssh_bridge_mode(tmp_path):
     plist["ProgramArguments"] = EMAIL_TRIAGE_SSH_BRIDGE_PROGRAM_ARGUMENTS
     plist["StartCalendarInterval"] = [
         {"Weekday": day, "Hour": 9, "Minute": 30}
+        for day in [1, 2, 3, 4]
+    ]
+    Path(spec.launchagent.plist_path).write_bytes(plistlib.dumps(plist))
+
+    with patch("assistant_scheduler_health._localhost_ssh_status", return_value={"status": "ok"}):
+        payload = evaluate_scheduler_job(
+            spec,
+            now=datetime(2026, 5, 22, 12, 0, tzinfo=ZoneInfo("Europe/Prague")),
+            write_state=False,
+            write_audit=False,
+            launchctl_text="state = not running\nruns = 0\nlast exit code = (never exited)\n",
+        )
+
+    assert payload["status"] == "healthy"
+    assert payload["execution_mode"] == "localhost_ssh_bridge"
+
+
+def test_task_spine_launchagent_spec_matches_production_schedule():
+    spec = TASK_SPINE_SPEC
+
+    assert JOB_REGISTRY["task_spine"] is spec
+    assert spec.workflow == "task_spine_scheduler"
+    assert spec.launchagent.label == "com.openclaw.rocky-task-spine"
+    assert spec.launchagent.program_arguments == TASK_SPINE_SSH_BRIDGE_PROGRAM_ARGUMENTS
+    assert "--notify" in " ".join(spec.launchagent.program_arguments)
+    assert launchagent_execution_mode(spec.launchagent.program_arguments) == "localhost_ssh_bridge"
+    assert launchagent_execution_mode(TASK_SPINE_DIRECT_PROGRAM_ARGUMENTS) == "direct_launchd_python"
+    assert spec.launchagent.working_directory == "/Users/clawdbot/.openclaw/workspace"
+    assert spec.launchagent.stdout_path == "/Users/clawdbot/.openclaw/logs/rocky-task-spine.log"
+    assert spec.launchagent.stderr_path == "/Users/clawdbot/.openclaw/logs/rocky-task-spine.err.log"
+    assert spec.launchagent.weekdays == [1, 2, 3, 4]
+    assert spec.launchagent.hour == 10
+    assert spec.launchagent.minute == 15
+    assert spec.state_path == "/Users/clawdbot/.openclaw/state/task_spine_scheduler.json"
+
+
+def test_task_spine_health_reports_ssh_bridge_mode(tmp_path):
+    base = _spec(tmp_path)
+    spec = SchedulerJobSpec(
+        job_name="task_spine",
+        job_label="Rocky personal task spine",
+        workflow="task_spine_scheduler",
+        launchagent=type(base.launchagent)(
+            label=base.launchagent.label,
+            plist_path=base.launchagent.plist_path,
+            program_arguments=TASK_SPINE_SSH_BRIDGE_PROGRAM_ARGUMENTS,
+            working_directory=base.launchagent.working_directory,
+            stdout_path=base.launchagent.stdout_path,
+            stderr_path=base.launchagent.stderr_path,
+            weekdays=[1, 2, 3, 4],
+            hour=10,
+            minute=15,
+            timezone=base.launchagent.timezone,
+            first_expected_run_after=base.launchagent.first_expected_run_after,
+        ),
+        state_path=str(tmp_path / "state.json"),
+    )
+    plist = plistlib.loads(Path(spec.launchagent.plist_path).read_bytes())
+    plist["ProgramArguments"] = TASK_SPINE_SSH_BRIDGE_PROGRAM_ARGUMENTS
+    plist["StartCalendarInterval"] = [
+        {"Weekday": day, "Hour": 10, "Minute": 15}
         for day in [1, 2, 3, 4]
     ]
     Path(spec.launchagent.plist_path).write_bytes(plistlib.dumps(plist))

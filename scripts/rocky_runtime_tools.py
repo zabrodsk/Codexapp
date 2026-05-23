@@ -98,6 +98,19 @@ from assistant_scheduler_state import AssistantSchedulerState
 from email_triage_live_booking import book_email_triage_proposal
 from email_triage_proposal_engine import build_email_triage_proposals
 from email_triage_scheduler import run_email_triage_scheduler
+from notion_task_manager import (
+    ensure_task_database_schema,
+    list_open_tasks,
+    notion_task_health,
+    upsert_task,
+)
+from task_deduper import dedupe_task_candidates
+from task_detector import detect_task_candidates
+from task_focus_live_booking import book_task_focus_proposal
+from task_focus_proposal_engine import build_task_focus_proposals
+from task_reminder_engine import run_task_reminders
+from task_signal_collector import build_manual_task_signal, collect_task_signals
+from task_spine_scheduler import run_task_spine_scheduler
 from training_calendar_live_booking import book_training_calendar_proposal
 from training_calendar_proposal_engine import build_training_calendar_proposals
 from training_calendar_reconciler import reconcile_training_calendar
@@ -134,6 +147,19 @@ RUNTIME_DEPLOYABLE_FILES = (
     "scripts/email_triage_reader.py",
     "scripts/email_triage_scheduler.py",
     "scripts/email_triage_time_estimator.py",
+    "scripts/notion_task_manager.py",
+    "scripts/task_deduper.py",
+    "scripts/task_detector.py",
+    "scripts/task_focus_live_booking.py",
+    "scripts/task_focus_proposal_engine.py",
+    "scripts/task_reminder_engine.py",
+    "scripts/task_signal_collector.py",
+    "scripts/task_spine_scheduler.py",
+    "skills/notion-task-manager/SKILL.md",
+    "skills/task-command-capture/SKILL.md",
+    "skills/task-detector/SKILL.md",
+    "skills/task-focus-calendar/SKILL.md",
+    "skills/task-reminder-engine/SKILL.md",
     "scripts/training_calendar_live_booking.py",
     "scripts/training_calendar_proposal_engine.py",
     "scripts/training_calendar_reconciler.py",
@@ -747,6 +773,119 @@ def build_parser() -> argparse.ArgumentParser:
         help="Do not append assistant audit events.",
     )
     email_scheduler.add_argument("--json", action="store_true", dest="json_output")
+
+    notion_health = sub.add_parser(
+        "notion-task-health",
+        help="Check Rocky's dedicated Notion task database configuration.",
+    )
+    notion_health.add_argument("--json", action="store_true", dest="json_output")
+
+    notion_schema = sub.add_parser(
+        "notion-task-schema-ensure",
+        help="Dry-run or create/repair Rocky's dedicated Notion task database schema.",
+    )
+    notion_schema.add_argument("--live", action="store_true")
+    notion_schema.add_argument("--json", action="store_true", dest="json_output")
+
+    notion_list = sub.add_parser(
+        "notion-task-list",
+        help="List sanitized open Rocky tasks from Notion.",
+    )
+    notion_list.add_argument("--limit", type=int, default=20)
+    notion_list.add_argument("--json", action="store_true", dest="json_output")
+
+    task_detect = sub.add_parser(
+        "task-detect",
+        help="Collect task signals and detect candidate personal tasks.",
+    )
+    task_detect.add_argument("--source", action="append", dest="sources")
+    task_detect.add_argument("--since-days", type=int, default=7)
+    task_detect.add_argument("--limit", type=int, default=30)
+    task_detect.add_argument("--no-llm", action="store_true", dest="no_llm")
+    task_detect.add_argument("--json", action="store_true", dest="json_output")
+
+    task_reminders = sub.add_parser(
+        "task-reminders-run",
+        help="Run task reminder selection and optional notification.",
+    )
+    task_reminders.add_argument("--today", dest="today")
+    task_reminders.add_argument("--notify", action="store_true")
+    task_reminders.add_argument("--notification-dry-run", action="store_true", dest="notification_dry_run")
+    task_reminders.add_argument("--notification-channel-id", dest="notification_channel_id")
+    task_reminders.add_argument("--ledger-path", dest="ledger_path")
+    task_reminders.add_argument("--scheduler-db", dest="scheduler_db")
+    task_reminders.add_argument("--json", action="store_true", dest="json_output")
+
+    task_focus = sub.add_parser(
+        "task-focus-proposals",
+        help="Build dry-run task focus calendar proposals from Notion tasks.",
+    )
+    task_focus.add_argument("--planning-date", dest="planning_date")
+    task_focus.add_argument("--db-path", dest="db_path")
+    task_focus.add_argument("--ledger-path", dest="ledger_path")
+    task_focus.add_argument(
+        "--no-write-audit",
+        action="store_false",
+        dest="write_audit",
+        default=True,
+        help="Do not append assistant audit events.",
+    )
+    task_focus.add_argument("--json", action="store_true", dest="json_output")
+
+    task_book = sub.add_parser(
+        "task-focus-book",
+        help="Supervised live booking for one selected Rocky task focus proposal.",
+    )
+    task_book.add_argument("--idempotency-key", required=True, dest="idempotency_key")
+    task_book.add_argument("--planning-date", dest="planning_date")
+    task_book.add_argument("--calendar", default="Calendar", dest="calendar_name")
+    task_book.add_argument("--db-path", dest="db_path")
+    task_book.add_argument("--state-db", dest="state_db")
+    task_book.add_argument("--scheduler-db", dest="scheduler_db")
+    task_book.add_argument("--ledger-path", dest="ledger_path")
+    task_book.add_argument("--live", action="store_true")
+    task_book.add_argument("--json", action="store_true", dest="json_output")
+
+    task_command = sub.add_parser(
+        "task-command-apply",
+        help="Apply an explicit Discord/email-style task command into Notion.",
+    )
+    task_command.add_argument("--text", required=True)
+    task_command.add_argument("--source", default="Command")
+    task_command.add_argument("--source-ref", default="manual:command", dest="source_ref")
+    task_command.add_argument("--live", action="store_true")
+    task_command.add_argument("--json", action="store_true", dest="json_output")
+
+    task_scheduler = sub.add_parser(
+        "task-spine-scheduler-run",
+        help="Run Rocky's autonomous personal task spine scheduler.",
+    )
+    task_scheduler.add_argument("--planning-date", dest="planning_date")
+    task_scheduler.add_argument("--live", action="store_true")
+    task_scheduler.add_argument("--notify", action="store_true")
+    task_scheduler.add_argument("--notification-dry-run", action="store_true", dest="notification_dry_run")
+    task_scheduler.add_argument("--notification-channel-id", dest="notification_channel_id")
+    task_scheduler.add_argument("--source", action="append", dest="sources")
+    task_scheduler.add_argument("--since-days", type=int, default=7)
+    task_scheduler.add_argument("--limit", type=int, default=30)
+    task_scheduler.add_argument("--db-path", dest="db_path")
+    task_scheduler.add_argument("--calendar-state-db", dest="calendar_state_db")
+    task_scheduler.add_argument("--scheduler-db", dest="scheduler_db")
+    task_scheduler.add_argument("--ledger-path", dest="ledger_path")
+    task_scheduler.add_argument(
+        "--state-file",
+        default="/Users/clawdbot/.openclaw/state/task_spine_scheduler.json",
+        dest="state_file",
+    )
+    task_scheduler.add_argument("--lock-ttl-seconds", type=int, default=1800, dest="lock_ttl_seconds")
+    task_scheduler.add_argument(
+        "--no-write-audit",
+        action="store_false",
+        dest="write_audit",
+        default=True,
+        help="Do not append assistant audit events.",
+    )
+    task_scheduler.add_argument("--json", action="store_true", dest="json_output")
 
     notification_dispatch = sub.add_parser(
         "assistant-notification-dispatch",
@@ -2532,6 +2671,147 @@ def cmd_assistant_notification_dispatch(args) -> int:
     return 0 if payload.get("status") in {"posted", "dry_run", "skipped"} else 1
 
 
+def cmd_notion_task_health(args) -> int:
+    payload = notion_task_health()
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Notion task health: {payload.get('status')} ({payload.get('reason')})")
+    return 0 if payload.get("status") == "ok" else 1
+
+
+def cmd_notion_task_schema_ensure(args) -> int:
+    payload = ensure_task_database_schema(live=args.live)
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Notion task schema: {payload.get('status')} ({payload.get('reason')})")
+    return 0 if payload.get("status") in {"ok", "created", "dry_run"} else 1
+
+
+def cmd_notion_task_list(args) -> int:
+    payload = list_open_tasks(limit=args.limit)
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Notion tasks: {payload.get('status')} count={len(payload.get('tasks') or [])}")
+        for task in (payload.get("tasks") or [])[: args.limit]:
+            print(f"- {task.get('priority')}: {task.get('title')}")
+    return 0 if payload.get("status") == "ok" else 1
+
+
+def cmd_task_detect(args) -> int:
+    signals = collect_task_signals(sources=args.sources, since_days=args.since_days, limit=args.limit)
+    detected = detect_task_candidates(signals.get("signals") or [], use_llm=not args.no_llm, max_candidates=args.limit)
+    deduped = dedupe_task_candidates(detected.get("candidates") or [])
+    payload = {
+        "status": "ok" if signals.get("status") == "ok" and detected.get("status") == "ok" else "degraded",
+        "signals": {"status": signals.get("status"), "signal_count": signals.get("signal_count"), "errors": signals.get("errors")},
+        "detected": detected,
+        "deduped": deduped,
+        "calendar_write_attempted": False,
+        "notion_write_attempted": False,
+    }
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Task detection: {payload['status']} candidates={deduped.get('candidate_count')}")
+    return 0 if payload["status"] in {"ok", "degraded"} else 1
+
+
+def cmd_task_reminders_run(args) -> int:
+    payload = run_task_reminders(
+        today=args.today,
+        notify=args.notify,
+        notification_dry_run=args.notification_dry_run,
+        notification_channel_id=args.notification_channel_id,
+        ledger_path=args.ledger_path,
+        scheduler_db_path=args.scheduler_db,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Task reminders: {payload.get('status')} count={payload.get('reminder_count', 0)}")
+    return 0 if payload.get("status") in {"ok", "skipped_no_reminders"} else 1
+
+
+def cmd_task_focus_proposals(args) -> int:
+    payload = build_task_focus_proposals(
+        planning_date=args.planning_date,
+        db_path=args.db_path,
+        ledger_path=args.ledger_path,
+        write_audit=args.write_audit,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Task focus proposals: {payload.get('status')} ({payload.get('reason')})")
+        if payload.get("idempotency_key"):
+            print(f"Idempotency key: {payload.get('idempotency_key')}")
+    return 0 if payload.get("status") in {"proposal", "skipped_no_focus_tasks", "skipped_duplicate", "skipped_weekend_target"} else 1
+
+
+def cmd_task_focus_book(args) -> int:
+    payload = book_task_focus_proposal(
+        idempotency_key=args.idempotency_key,
+        planning_date=args.planning_date,
+        calendar_name=args.calendar_name,
+        live=args.live,
+        db_path=args.db_path,
+        state_db_path=args.state_db,
+        scheduler_db_path=args.scheduler_db,
+        ledger_path=args.ledger_path,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Task focus booking: {payload.get('status')} ({payload.get('reason')})")
+    if payload.get("status") in {"created", "skipped_duplicate"}:
+        return 0
+    return 2 if payload.get("reason") == "live_flag_required" else 1
+
+
+def cmd_task_command_apply(args) -> int:
+    signal = build_manual_task_signal(args.text, source=args.source, source_ref=args.source_ref)
+    detected = detect_task_candidates([signal], use_llm=False, max_candidates=1)
+    candidates = detected.get("candidates") or []
+    if not candidates:
+        payload = {"status": "blocked", "reason": "task_not_detected", "calendar_write_attempted": False, "notion_write_attempted": False}
+    else:
+        task = candidates[0]
+        payload = upsert_task(task, live=args.live)
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Task command: {payload.get('status')} ({payload.get('reason')})")
+    return 0 if payload.get("status") in {"created", "updated", "dry_run"} else 1
+
+
+def cmd_task_spine_scheduler_run(args) -> int:
+    payload = run_task_spine_scheduler(
+        planning_date=args.planning_date,
+        live=args.live,
+        notify=args.notify,
+        notification_dry_run=args.notification_dry_run,
+        notification_channel_id=args.notification_channel_id,
+        sources=args.sources,
+        since_days=args.since_days,
+        limit=args.limit,
+        db_path=args.db_path,
+        calendar_state_db_path=args.calendar_state_db,
+        scheduler_db_path=args.scheduler_db,
+        ledger_path=args.ledger_path,
+        state_file=args.state_file,
+        lock_ttl_seconds=args.lock_ttl_seconds,
+        write_audit=args.write_audit,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Task spine scheduler: {payload.get('status')} ({payload.get('reason')})")
+    return 0 if payload.get("status") in {"ok", "degraded", "skipped_duplicate_run"} else 1
+
+
 def cmd_calendar_tcc_probe(args) -> int:
     payload = build_calendar_tcc_probe(db_path=args.db_path)
     if args.json_output:
@@ -2797,6 +3077,15 @@ def main() -> int:
         "email-triage-proposals": cmd_email_triage_proposals,
         "email-triage-book": cmd_email_triage_book,
         "email-triage-scheduler-run": cmd_email_triage_scheduler_run,
+        "notion-task-health": cmd_notion_task_health,
+        "notion-task-schema-ensure": cmd_notion_task_schema_ensure,
+        "notion-task-list": cmd_notion_task_list,
+        "task-detect": cmd_task_detect,
+        "task-reminders-run": cmd_task_reminders_run,
+        "task-focus-proposals": cmd_task_focus_proposals,
+        "task-focus-book": cmd_task_focus_book,
+        "task-command-apply": cmd_task_command_apply,
+        "task-spine-scheduler-run": cmd_task_spine_scheduler_run,
         "assistant-notification-dispatch": cmd_assistant_notification_dispatch,
         "assistant-scheduler-health": cmd_assistant_scheduler_health,
         "assistant-dead-letters": cmd_assistant_dead_letters,

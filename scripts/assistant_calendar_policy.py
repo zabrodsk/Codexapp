@@ -134,6 +134,8 @@ def evaluate_calendar_policy(
         reasons.append("coding_focus_minimum_duration_is_60_minutes")
     if kind == "coding_focus" and end_dt.time() > time(19, 30):
         reasons.append("coding_focus_must_end_by_19_30")
+    if kind == "task_focus" and end_dt.time() > time(19, 30):
+        reasons.append("task_focus_must_end_by_19_30")
 
     idempotency_key = stable_idempotency_key(
         kind=kind,

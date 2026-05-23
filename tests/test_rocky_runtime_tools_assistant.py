@@ -24,6 +24,13 @@ from rocky_runtime_tools import (
     cmd_email_triage_book,
     cmd_email_triage_proposals,
     cmd_email_triage_scheduler_run,
+    cmd_notion_task_health,
+    cmd_notion_task_schema_ensure,
+    cmd_task_detect,
+    cmd_task_focus_book,
+    cmd_task_focus_proposals,
+    cmd_task_reminders_run,
+    cmd_task_spine_scheduler_run,
     cmd_training_calendar_proposals,
     cmd_training_calendar_book,
     cmd_training_calendar_reconcile,
@@ -117,6 +124,14 @@ def test_parser_includes_assistant_commands():
         ["email-triage-book", "--idempotency-key", "rocky:email:test"]
     ).command == "email-triage-book"
     assert parser.parse_args(["email-triage-scheduler-run"]).command == "email-triage-scheduler-run"
+    assert parser.parse_args(["notion-task-health"]).command == "notion-task-health"
+    assert parser.parse_args(["notion-task-schema-ensure"]).command == "notion-task-schema-ensure"
+    assert parser.parse_args(["task-detect"]).command == "task-detect"
+    assert parser.parse_args(["task-reminders-run"]).command == "task-reminders-run"
+    assert parser.parse_args(["task-focus-proposals"]).command == "task-focus-proposals"
+    assert parser.parse_args(["task-focus-book", "--idempotency-key", "rocky:task:test"]).command == "task-focus-book"
+    assert parser.parse_args(["task-command-apply", "--text", "remember this"]).command == "task-command-apply"
+    assert parser.parse_args(["task-spine-scheduler-run"]).command == "task-spine-scheduler-run"
     assert parser.parse_args(
         ["assistant-notification-dispatch", "--status", "blocked", "--reason", "test", "--dry-run"]
     ).command == "assistant-notification-dispatch"
@@ -678,6 +693,14 @@ def test_runtime_deployable_files_include_training_calendar_modules():
     assert "scripts/email_triage_proposal_engine.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/email_triage_live_booking.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/email_triage_scheduler.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/notion_task_manager.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/task_signal_collector.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/task_detector.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/task_deduper.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/task_reminder_engine.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/task_focus_proposal_engine.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/task_focus_live_booking.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/task_spine_scheduler.py" in RUNTIME_DEPLOYABLE_FILES
 
 
 def test_training_calendar_reconcile_cli_uses_reconcile_path(tmp_path, capsys):
@@ -736,3 +759,156 @@ def test_assistant_notification_dispatch_cli_dry_run(tmp_path, capsys):
     assert result == 0
     assert payload["status"] == "dry_run"
     assert payload["notification_attempted"] is False
+
+
+def test_notion_task_health_cli_uses_health_path(capsys):
+    with patch(
+        "rocky_runtime_tools.notion_task_health",
+        return_value={
+            "status": "ok",
+            "token_configured": True,
+            "database_configured": True,
+            "calendar_write_attempted": False,
+            "notion_write_attempted": False,
+        },
+    ) as health:
+        result = cmd_notion_task_health(_args(json_output=True))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert payload["status"] == "ok"
+    health.assert_called_once()
+
+
+def test_notion_task_schema_ensure_cli_requires_live_for_writes(capsys):
+    with patch(
+        "rocky_runtime_tools.ensure_task_database_schema",
+        return_value={"status": "dry_run", "notion_write_attempted": False, "calendar_write_attempted": False},
+    ) as ensure:
+        result = cmd_notion_task_schema_ensure(_args(live=False, json_output=True))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert payload["notion_write_attempted"] is False
+    ensure.assert_called_once()
+    assert ensure.call_args.kwargs["live"] is False
+
+
+def test_task_detect_cli_collects_and_dedupes(capsys):
+    with patch(
+        "rocky_runtime_tools.collect_task_signals",
+        return_value={"status": "ok", "signal_count": 1, "signals": [{"signal_id": "s1"}], "errors": []},
+    ), patch(
+        "rocky_runtime_tools.detect_task_candidates",
+        return_value={"status": "ok", "candidate_count": 1, "candidates": [{"title": "Task"}]},
+    ), patch(
+        "rocky_runtime_tools.dedupe_task_candidates",
+        return_value={"status": "ok", "candidate_count": 1, "candidates": [{"title": "Task"}]},
+    ):
+        result = cmd_task_detect(_args(sources=None, since_days=7, limit=30, no_llm=True, json_output=True))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert payload["calendar_write_attempted"] is False
+
+
+def test_task_reminders_cli_uses_reminder_engine(capsys):
+    with patch(
+        "rocky_runtime_tools.run_task_reminders",
+        return_value={"status": "skipped_no_reminders", "reminder_count": 0},
+    ) as reminders:
+        result = cmd_task_reminders_run(
+            _args(
+                today="2026-05-25",
+                notify=False,
+                notification_dry_run=False,
+                notification_channel_id=None,
+                ledger_path=None,
+                scheduler_db=None,
+                json_output=True,
+            )
+        )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert payload["status"] == "skipped_no_reminders"
+    reminders.assert_called_once()
+
+
+def test_task_focus_proposals_cli_uses_dry_run_engine(tmp_path, capsys):
+    with patch(
+        "rocky_runtime_tools.build_task_focus_proposals",
+        return_value={"status": "proposal", "calendar_write_attempted": False, "idempotency_key": "rocky:task"},
+    ) as proposals:
+        result = cmd_task_focus_proposals(
+            _args(
+                planning_date="2026-05-25",
+                db_path=None,
+                ledger_path=str(tmp_path / "audit.jsonl"),
+                write_audit=False,
+                json_output=True,
+            )
+        )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert payload["calendar_write_attempted"] is False
+    proposals.assert_called_once()
+
+
+def test_task_focus_book_cli_requires_live_flag_path(tmp_path, capsys):
+    with patch(
+        "rocky_runtime_tools.book_task_focus_proposal",
+        return_value={"status": "blocked", "reason": "live_flag_required", "calendar_write_attempted": False},
+    ) as book:
+        result = cmd_task_focus_book(
+            _args(
+                idempotency_key="rocky:task",
+                planning_date="2026-05-25",
+                calendar_name="Calendar",
+                live=False,
+                db_path=None,
+                state_db=None,
+                scheduler_db=None,
+                ledger_path=str(tmp_path / "audit.jsonl"),
+                json_output=True,
+            )
+        )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 2
+    assert payload["reason"] == "live_flag_required"
+    book.assert_called_once()
+
+
+def test_task_spine_scheduler_cli_uses_scheduler_engine(tmp_path, capsys):
+    with patch(
+        "rocky_runtime_tools.run_task_spine_scheduler",
+        return_value={"status": "ok", "reason": "task_spine_completed", "calendar_write_attempted": False},
+    ) as scheduler:
+        result = cmd_task_spine_scheduler_run(
+            _args(
+                planning_date="2026-05-25",
+                live=True,
+                notify=True,
+                notification_dry_run=True,
+                notification_channel_id="channel",
+                sources=None,
+                since_days=7,
+                limit=30,
+                db_path=None,
+                calendar_state_db=None,
+                scheduler_db=str(tmp_path / "scheduler.sqlite3"),
+                ledger_path=str(tmp_path / "audit.jsonl"),
+                state_file=str(tmp_path / "task_spine.json"),
+                lock_ttl_seconds=1800,
+                write_audit=True,
+                json_output=True,
+            )
+        )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert payload["status"] == "ok"
+    scheduler.assert_called_once()
+    assert scheduler.call_args.kwargs["live"] is True
