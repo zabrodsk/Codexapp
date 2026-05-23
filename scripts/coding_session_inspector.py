@@ -22,7 +22,8 @@ from coding_signal_sync import (
 DEFAULT_LAPTOP_MANIFEST_PATH = Path("/Users/clawdbot/.openclaw/inbox/coding-signals/dusan-laptop/latest.json")
 
 
-def load_laptop_manifest(path: str | Path | None = DEFAULT_LAPTOP_MANIFEST_PATH) -> dict[str, Any] | None:
+def load_laptop_manifest(path: str | Path | None = None) -> dict[str, Any] | None:
+    path = DEFAULT_LAPTOP_MANIFEST_PATH if path is None else path
     if not path:
         return None
     target = Path(path).expanduser()
@@ -37,7 +38,7 @@ def load_laptop_manifest(path: str | Path | None = DEFAULT_LAPTOP_MANIFEST_PATH)
 
 def inspect_coding_signals(
     *,
-    laptop_manifest_path: str | Path | None = DEFAULT_LAPTOP_MANIFEST_PATH,
+    laptop_manifest_path: str | Path | None = None,
     include_local_sessions: bool = True,
     include_repos: bool = True,
     repo_roots: list[str | Path] | None = None,
@@ -55,7 +56,13 @@ def inspect_coding_signals(
             "repos": [],
         }
         signals.extend(_signals_from_manifest(local_manifest, origin="mac_mini_local"))
-    repo_summary = build_repo_signal_summary(repo_roots=repo_roots) if include_repos else {"repos": []}
+    if include_repos:
+        try:
+            repo_summary = build_repo_signal_summary(repo_roots=repo_roots)
+        except Exception as exc:
+            repo_summary = {"status": "degraded", "reason": "repo_inspection_failed", "error_hash": _hash_text(str(exc)), "repos": [], "repo_count": 0, "dirty_repo_count": 0}
+    else:
+        repo_summary = {"status": "skipped", "reason": "repo_inspection_disabled", "repos": [], "repo_count": 0, "dirty_repo_count": 0}
     for repo in repo_summary.get("repos") or []:
         signals.append(_repo_signal(repo))
     return {
@@ -64,7 +71,8 @@ def inspect_coding_signals(
         "laptop_manifest_status": _manifest_status(manifest),
         "signal_count": len(signals),
         "signals": signals,
-        "repo_summary": {"repo_count": repo_summary.get("repo_count"), "dirty_repo_count": repo_summary.get("dirty_repo_count")},
+        "repo_summary": {"status": repo_summary.get("status"), "repo_count": repo_summary.get("repo_count"), "dirty_repo_count": repo_summary.get("dirty_repo_count"), "reason": repo_summary.get("reason")},
+        "repo_visibility": {"status": repo_summary.get("status"), "repo_count": repo_summary.get("repo_count", 0), "dirty_repo_count": repo_summary.get("dirty_repo_count", 0)},
         "calendar_write_attempted": False,
     }
 
@@ -114,7 +122,9 @@ def _session_signal(session: dict[str, Any], *, provider: str, origin: str) -> d
         "cwd": safe_path_ref(session.get("cwd")),
         "branch": branch,
         "last_seen_at": session.get("updated_at") or session.get("last_seen_at") or "",
-        "confidence_hint": 0.65,
+        "confidence_hint": 0.76,
+        "signal_kind": "session",
+        "fresh_signal": sanitize_text(thread or where, limit=220),
         "prompt_injection_flagged": bool(session.get("prompt_injection_flagged")),
         "evidence_refs": [session.get("source_ref") or f"{provider}:session:{session.get('session_id')}"]
     }
@@ -143,9 +153,17 @@ def _repo_signal(repo: dict[str, Any], *, origin: str = "repo_inspector") -> dic
         "cwd": safe_path_ref(repo.get("path")),
         "branch": branch,
         "last_seen_at": repo.get("last_seen_at") or utc_now_iso(),
-        "confidence_hint": 0.8 if dirty else 0.45,
+        "confidence_hint": 0.55 if dirty else 0.35,
+        "signal_kind": "repo",
+        "fresh_signal": where,
         "prompt_injection_flagged": False,
         "evidence_refs": [repo.get("source_ref") or f"git:repo:{project}"],
         "dirty": dirty,
         "modified_count": modified,
     }
+
+
+def _hash_text(value: Any) -> str:
+    import hashlib
+
+    return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()[:16]

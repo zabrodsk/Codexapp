@@ -143,10 +143,14 @@ def test_parser_includes_assistant_commands():
     assert parser.parse_args(["task-focus-book", "--idempotency-key", "rocky:task:test"]).command == "task-focus-book"
     assert parser.parse_args(["coding-signal-sync"]).command == "coding-signal-sync"
     assert parser.parse_args(["coding-signal-inspect"]).command == "coding-signal-inspect"
+    assert parser.parse_args(["coding-memory-enrich", "--project", "private-local-memory-os"]).command == "coding-memory-enrich"
     assert parser.parse_args(["coding-work-briefing"]).command == "coding-work-briefing"
+    assert parser.parse_args(["coding-work-briefing", "--no-memory"]).use_memory is False
     assert parser.parse_args(["coding-focus-proposals"]).command == "coding-focus-proposals"
+    assert parser.parse_args(["coding-focus-proposals", "--no-memory"]).use_memory is False
     assert parser.parse_args(["coding-focus-book", "--idempotency-key", "rocky:coding:test"]).command == "coding-focus-book"
     assert parser.parse_args(["coding-work-scheduler-run"]).command == "coding-work-scheduler-run"
+    assert parser.parse_args(["coding-work-scheduler-run", "--no-memory"]).use_memory is False
     assert parser.parse_args(["coding-work-llm-health"]).command == "coding-work-llm-health"
     assert parser.parse_args(["task-command-apply", "--text", "remember this"]).command == "task-command-apply"
     assert parser.parse_args(["task-spine-scheduler-run"]).command == "task-spine-scheduler-run"
@@ -764,11 +768,13 @@ def test_runtime_deployable_files_include_training_calendar_modules():
     assert "scripts/coding_signal_sync.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/coding_session_inspector.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/coding_repo_inspector.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/coding_memory_enricher.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/coding_work_briefing_builder.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/coding_focus_proposal_engine.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/coding_focus_live_booking.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/coding_work_scheduler.py" in RUNTIME_DEPLOYABLE_FILES
     assert "skills/coding-session-inspector/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
+    assert "skills/coding-memory-enricher/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
     assert "skills/coding-work-briefing/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
     assert "skills/coding-focus-calendar/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
 

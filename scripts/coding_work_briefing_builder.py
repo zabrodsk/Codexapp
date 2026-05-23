@@ -11,6 +11,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from assistant_codex_llm import AssistantCodexLLMError, generate_codex_text, redact_sensitive
+from coding_memory_enricher import enrich_coding_work_items
 from coding_session_inspector import inspect_coding_signals
 from coding_signal_sync import sanitize_text, utc_now_iso
 
@@ -33,7 +34,9 @@ def build_coding_work_briefing(
     laptop_manifest_path: str | Path | None = None,
     tasks: list[dict[str, Any]] | None = None,
     use_llm: bool = True,
+    use_memory: bool = True,
     llm_func: Any | None = None,
+    memory_query_func: Any | None = None,
     max_items: int = 8,
 ) -> dict[str, Any]:
     planning_day = _parse_date(planning_date) if planning_date else datetime.now(ZoneInfo(TIMEZONE)).date()
@@ -42,6 +45,10 @@ def build_coding_work_briefing(
     signals = signals_payload.get("signals") or []
     task_signals = _task_signals(tasks or [])
     work_items = _build_work_items([*signals, *task_signals], planning_day=planning_day)
+    work_items = sorted(work_items, key=_sort_key)
+    memory_status = {"status": "skipped", "reason": "memory_disabled" if not use_memory else "no_work_items", "queried_projects": 0}
+    if use_memory and work_items:
+        work_items, memory_status = enrich_coding_work_items(work_items, query_func=memory_query_func, max_projects=min(3, max_items))
     llm_status = {"status": "skipped", "reason": "llm_disabled"}
     if use_llm and work_items:
         ranked, llm_status = _rank_with_llm(work_items, llm_func=llm_func)
@@ -57,7 +64,9 @@ def build_coding_work_briefing(
         "timezone": TIMEZONE,
         "signal_status": signals_payload.get("status"),
         "laptop_manifest_status": signals_payload.get("laptop_manifest_status"),
+        "repo_visibility": signals_payload.get("repo_visibility"),
         "llm": _safe_llm_status(llm_status),
+        "memory": _safe_memory_status(memory_status),
         "work_item_count": len(work_items),
         "selected_count": len(selected),
         "work_items": work_items,
@@ -73,8 +82,14 @@ def render_coding_briefing(work_items: list[dict[str, Any]], *, selected_items: 
     lines = ["Rocky noon coding briefing", "", "Most important unfinished work:"]
     for idx, item in enumerate(work_items[:5], start=1):
         lines.append(f"{idx}. {item['project']}: {item['title']} [{item['priority']}, confidence {item['confidence']:.2f}]")
+        if item.get("fresh_signal"):
+            lines.append(f"   Fresh signal: {item['fresh_signal']}")
         if item.get("where_left_off"):
             lines.append(f"   Where left off: {item['where_left_off']}")
+        if item.get("durable_context_summary"):
+            lines.append(f"   Durable context: {item['durable_context_summary']}")
+        if item.get("durable_open_loops"):
+            lines.append(f"   Open loop: {item['durable_open_loops'][0]}")
         if item.get("recommended_next_step"):
             lines.append(f"   Next: {item['recommended_next_step']}")
         if item.get("requires_dusan_decision"):
@@ -98,15 +113,19 @@ def _build_work_items(signals: list[dict[str, Any]], *, planning_day: date) -> l
         grouped.setdefault(project.lower(), []).append(signal)
     items: list[dict[str, Any]] = []
     for _, rows in grouped.items():
-        rows = sorted(rows, key=lambda row: str(row.get("last_seen_at") or ""), reverse=True)
+        rows = sorted(rows, key=_signal_sort_key, reverse=True)
         primary = rows[0]
         project = sanitize_text(primary.get("project") or "Coding work", limit=80) or "Coding work"
         source_refs = _unique([ref for row in rows for ref in (row.get("evidence_refs") or [row.get("source_ref")]) if ref])
         injection = any(bool(row.get("prompt_injection_flagged")) or PROMPT_INJECTION_RE.search(str(row.get("summary") or "")) for row in rows)
         dirty = any(bool(row.get("dirty")) for row in rows)
-        confidence = max(float(row.get("confidence_hint") or 0.5) for row in rows)
-        if dirty:
-            confidence = max(confidence, 0.82)
+        session_rows = [row for row in rows if _is_session_signal(row)]
+        if session_rows:
+            confidence = max(float(row.get("confidence_hint") or 0.5) for row in session_rows)
+            if dirty:
+                confidence = max(confidence, min(0.8, confidence + 0.04))
+        else:
+            confidence = min(max(float(row.get("confidence_hint") or 0.5) for row in rows), 0.6)
         if injection:
             confidence = min(confidence, 0.35)
         decision = _looks_like_decision(primary) or injection
@@ -124,13 +143,28 @@ def _build_work_items(signals: list[dict[str, Any]], *, planning_day: date) -> l
             "source_refs": source_refs,
             "evidence_refs": source_refs[:5],
             "last_seen_at": primary.get("last_seen_at") or utc_now_iso(),
+            "fresh_signal": sanitize_text(primary.get("fresh_signal") or primary.get("summary") or primary.get("where_left_off") or f"Recent activity around {project}.", limit=240),
             "where_left_off": sanitize_text(primary.get("where_left_off") or primary.get("summary") or f"Recent activity around {project}.", limit=240),
             "recommended_next_step": sanitize_text(primary.get("recommended_next_step") or "Open the repo/session and continue the highest-confidence unfinished coding thread.", limit=240),
             "done_signal": "Commit, handoff, or explicitly mark the coding thread done.",
+            "signal_types": _unique([row.get("source") for row in rows if row.get("source")]),
+            "has_session_signal": bool(session_rows),
             "prompt_injection_flagged": bool(injection),
         }
         items.append(item)
     return items
+
+
+def _is_session_signal(row: dict[str, Any]) -> bool:
+    source = str(row.get("source") or "")
+    source_ref = str(row.get("source_ref") or " ")
+    return source in {"codex", "claude"} or source_ref.startswith(("codex:", "claude:")) or str(row.get("signal_kind") or "") == "session"
+
+
+def _signal_sort_key(row: dict[str, Any]) -> tuple[int, str]:
+    source = str(row.get("source") or "")
+    precedence = 3 if source in {"codex", "claude"} else 2 if source == "notion_task" else 1 if source == "git_repo" else 0
+    return (precedence, str(row.get("last_seen_at") or ""))
 
 
 def _task_signals(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -240,6 +274,10 @@ def _unique(values: list[Any]) -> list[Any]:
             seen.add(key)
             result.append(value)
     return result
+
+
+def _safe_memory_status(status: dict[str, Any]) -> dict[str, Any]:
+    return {key: redact_sensitive(value) for key, value in status.items() if key in {"status", "reason", "queried_projects", "enriched_projects", "failed_projects"}}
 
 
 def _safe_llm_status(status: dict[str, Any]) -> dict[str, Any]:

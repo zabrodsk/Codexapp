@@ -95,12 +95,17 @@ def build_coding_focus_proposals(
 
 
 def build_coding_focus_description(item: dict[str, Any], *, audit_id: str | None, idempotency_key: str | None) -> dict[str, Any]:
+    refs = list(item.get("source_refs") or item.get("evidence_refs") or [])
+    refs.extend(item.get("memory_refs") or [])
     return {
         "focus_for_this_block": _safe(item.get("title") or item.get("project") or "Coding focus"),
+        "fresh_signal": _safe(item.get("fresh_signal") or item.get("where_left_off") or "Recent sanitized coding session signal."),
         "where_you_left_off": _safe(item.get("where_left_off") or "Review the referenced session and repo state."),
+        "durable_context": _safe(item.get("durable_context_summary") or "No durable Obsidian context matched this work item."),
+        "open_loop_or_decision": _safe(_first_text(item.get("durable_open_loops") or item.get("durable_decisions") or [])),
         "recommended_next_step": _safe(item.get("recommended_next_step") or "Continue the highest-confidence unfinished coding thread."),
         "done_signal": _safe(item.get("done_signal") or "Commit, handoff, or mark the work item done."),
-        "relevant_references": ", ".join(str(ref) for ref in (item.get("source_refs") or item.get("evidence_refs") or [])[:5]) or "none",
+        "relevant_references": ", ".join(str(ref) for ref in refs[:7]) or "none",
         "work_item_id": item.get("work_item_id") or "",
         "project": item.get("project") or "",
         "audit_id": audit_id or "dry-run-not-recorded",
@@ -160,8 +165,17 @@ def _description_text(metadata: dict[str, Any], base_description: str | None) ->
         "Focus for this block:",
         str(metadata.get("focus_for_this_block") or "Coding focus"),
         "",
+        "Fresh signal:",
+        str(metadata.get("fresh_signal") or "Recent sanitized coding session signal."),
+        "",
         "Where you left off:",
         str(metadata.get("where_you_left_off") or "Review recent sanitized coding signals."),
+        "",
+        "Durable context:",
+        str(metadata.get("durable_context") or "No durable Obsidian context matched this work item."),
+        "",
+        "Open loop / decision:",
+        str(metadata.get("open_loop_or_decision") or "none"),
         "",
         "Recommended next step:",
         str(metadata.get("recommended_next_step") or "Continue the unfinished coding thread."),
@@ -211,7 +225,13 @@ def _duration_for_item(item: dict[str, Any], *, remaining: int) -> int:
 
 
 def _safe_item(item: dict[str, Any]) -> dict[str, Any]:
-    return {key: item.get(key) for key in ("work_item_id", "project", "title", "priority", "confidence", "requires_dusan_decision", "where_left_off", "recommended_next_step", "source_refs")}
+    return {key: item.get(key) for key in ("work_item_id", "project", "title", "priority", "confidence", "requires_dusan_decision", "fresh_signal", "where_left_off", "durable_context_summary", "durable_open_loops", "durable_decisions", "recommended_next_step", "source_refs", "memory_refs")}
+
+
+def _first_text(values: Any) -> str:
+    if isinstance(values, list) and values:
+        return str(values[0])
+    return str(values or "")
 
 
 def _safe(value: Any, limit: int = 300) -> str:

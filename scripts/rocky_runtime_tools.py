@@ -98,6 +98,7 @@ from assistant_scheduler_health import evaluate_all_scheduler_jobs, format_sched
 from assistant_scheduler_state import AssistantSchedulerState
 from coding_focus_live_booking import book_coding_focus_proposal
 from coding_focus_proposal_engine import build_coding_focus_proposals
+from coding_memory_enricher import enrich_project_memory
 from coding_session_inspector import inspect_coding_signals
 from coding_signal_sync import run_sync as run_coding_signal_sync
 from coding_work_briefing_builder import build_coding_work_briefing
@@ -155,6 +156,7 @@ RUNTIME_DEPLOYABLE_FILES = (
     "scripts/coding_signal_sync.py",
     "scripts/coding_session_inspector.py",
     "scripts/coding_repo_inspector.py",
+    "scripts/coding_memory_enricher.py",
     "scripts/coding_work_briefing_builder.py",
     "scripts/coding_focus_proposal_engine.py",
     "scripts/coding_focus_live_booking.py",
@@ -182,6 +184,7 @@ RUNTIME_DEPLOYABLE_FILES = (
     "skills/task-lifecycle-engine/SKILL.md",
     "skills/task-reminder-engine/SKILL.md",
     "skills/coding-session-inspector/SKILL.md",
+    "skills/coding-memory-enricher/SKILL.md",
     "skills/coding-work-briefing/SKILL.md",
     "skills/coding-focus-calendar/SKILL.md",
     "scripts/training_calendar_live_booking.py",
@@ -956,6 +959,15 @@ def build_parser() -> argparse.ArgumentParser:
     coding_inspect.add_argument("--limit", type=int, default=30)
     coding_inspect.add_argument("--json", action="store_true", dest="json_output")
 
+    coding_memory = sub.add_parser(
+        "coding-memory-enrich",
+        help="Preview read-only Obsidian Layer 3 memory enrichment for one coding project.",
+    )
+    coding_memory.add_argument("--project", required=True)
+    coding_memory.add_argument("--title", default="")
+    coding_memory.add_argument("--limit", type=int, default=3)
+    coding_memory.add_argument("--json", action="store_true", dest="json_output")
+
     coding_briefing = sub.add_parser(
         "coding-work-briefing",
         help="Build Rocky's noon coding work briefing from sanitized signals.",
@@ -963,6 +975,7 @@ def build_parser() -> argparse.ArgumentParser:
     coding_briefing.add_argument("--planning-date", dest="planning_date")
     coding_briefing.add_argument("--laptop-manifest-path", dest="laptop_manifest_path")
     coding_briefing.add_argument("--no-llm", action="store_true", dest="no_llm")
+    coding_briefing.add_argument("--no-memory", action="store_false", dest="use_memory", default=True)
     coding_briefing.add_argument("--json", action="store_true", dest="json_output")
 
     coding_focus = sub.add_parser(
@@ -974,6 +987,7 @@ def build_parser() -> argparse.ArgumentParser:
     coding_focus.add_argument("--db-path", dest="db_path")
     coding_focus.add_argument("--ledger-path", dest="ledger_path")
     coding_focus.add_argument("--max-blocks", type=int, default=2, dest="max_blocks")
+    coding_focus.add_argument("--no-memory", action="store_false", dest="use_memory", default=True)
     coding_focus.add_argument("--no-write-audit", action="store_false", dest="write_audit", default=True)
     coding_focus.add_argument("--json", action="store_true", dest="json_output")
 
@@ -1002,6 +1016,7 @@ def build_parser() -> argparse.ArgumentParser:
     coding_scheduler.add_argument("--notification-channel-id", dest="notification_channel_id")
     coding_scheduler.add_argument("--laptop-manifest-path", dest="laptop_manifest_path")
     coding_scheduler.add_argument("--max-blocks", type=int, default=2, dest="max_blocks")
+    coding_scheduler.add_argument("--no-memory", action="store_false", dest="use_memory", default=True)
     coding_scheduler.add_argument("--db-path", dest="db_path")
     coding_scheduler.add_argument("--calendar-state-db", dest="calendar_state_db")
     coding_scheduler.add_argument("--scheduler-db", dest="scheduler_db")
@@ -2957,11 +2972,25 @@ def cmd_coding_signal_inspect(args) -> int:
     return 0 if payload.get("status") in {"ok", "empty"} else 1
 
 
+def cmd_coding_memory_enrich(args) -> int:
+    payload = enrich_project_memory(args.project, title=args.title, limit=args.limit)
+    payload = {**payload, "workflow": "coding_memory_enricher", "calendar_write_attempted": False}
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(
+            f"Coding memory enrichment: {payload.get('status')} "
+            f"refs={len(payload.get('memory_refs') or [])}"
+        )
+    return 0 if payload.get("status") in {"ok", "empty", "skipped"} else 1
+
+
 def cmd_coding_work_briefing(args) -> int:
     payload = build_coding_work_briefing(
         planning_date=args.planning_date,
         laptop_manifest_path=args.laptop_manifest_path,
         use_llm=not args.no_llm,
+        use_memory=getattr(args, "use_memory", True),
     )
     if args.json_output:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -2974,6 +3003,7 @@ def cmd_coding_focus_proposals(args) -> int:
     briefing = build_coding_work_briefing(
         planning_date=args.planning_date,
         laptop_manifest_path=args.laptop_manifest_path,
+        use_memory=getattr(args, "use_memory", True),
     )
     payload = build_coding_focus_proposals(
         planning_date=args.planning_date,
@@ -3020,6 +3050,7 @@ def cmd_coding_work_scheduler_run(args) -> int:
         notification_channel_id=args.notification_channel_id,
         laptop_manifest_path=args.laptop_manifest_path,
         max_blocks=args.max_blocks,
+        use_memory=getattr(args, "use_memory", True),
         db_path=args.db_path,
         calendar_state_db_path=args.calendar_state_db,
         scheduler_db_path=args.scheduler_db,
@@ -3362,6 +3393,7 @@ def main() -> int:
         "task-focus-book": cmd_task_focus_book,
         "coding-signal-sync": cmd_coding_signal_sync,
         "coding-signal-inspect": cmd_coding_signal_inspect,
+        "coding-memory-enrich": cmd_coding_memory_enrich,
         "coding-work-briefing": cmd_coding_work_briefing,
         "coding-focus-proposals": cmd_coding_focus_proposals,
         "coding-focus-book": cmd_coding_focus_book,

@@ -45,6 +45,7 @@ def run_coding_work_scheduler(
     notification_channel_id: str | None = None,
     laptop_manifest_path: str | Path | None = None,
     max_blocks: int = 2,
+    use_memory: bool = True,
     db_path: str | Path | None = None,
     calendar_state_db_path: str | Path | None = None,
     scheduler_db_path: str | Path | None = None,
@@ -80,6 +81,7 @@ def run_coding_work_scheduler(
             notification_channel_id=notification_channel_id,
             laptop_manifest_path=laptop_manifest_path,
             max_blocks=max_blocks,
+            use_memory=use_memory,
             db_path=db_path,
             calendar_state_db_path=calendar_state_db_path,
             scheduler_db_path=scheduler_db_path,
@@ -109,6 +111,7 @@ def _run_inner(
     notification_channel_id: str | None,
     laptop_manifest_path: str | Path | None,
     max_blocks: int,
+    use_memory: bool,
     db_path: str | Path | None,
     calendar_state_db_path: str | Path | None,
     scheduler_db_path: str | Path | None,
@@ -139,7 +142,7 @@ def _run_inner(
             "calendar_write_attempted": False,
         }
     else:
-        briefing = build_coding_work_briefing(planning_date=planning_day, signals_payload=signals_payload, laptop_manifest_path=laptop_manifest_path, tasks=[], use_llm=True, llm_func=llm_func)
+        briefing = build_coding_work_briefing(planning_date=planning_day, signals_payload=signals_payload, laptop_manifest_path=laptop_manifest_path, tasks=[], use_llm=True, use_memory=use_memory, llm_func=llm_func)
     proposals = build_coding_focus_proposals(planning_date=planning_day, briefing_payload=briefing, work_items=briefing.get("selected_focus_items"), db_path=db_path, ledger_path=ledger_path, write_audit=True, existing_events=existing_events, max_blocks=max_blocks)
     bookings: list[dict[str, Any]] = []
     if live and proposals.get("status") == "proposal":
@@ -227,13 +230,14 @@ def _write_state(path: Path, payload: dict[str, Any]) -> None:
         "created_count": payload.get("created_count", 0),
         "skipped_count": payload.get("skipped_count", 0),
         "work_item_count": ((payload.get("briefing") or {}).get("work_item_count") if isinstance(payload.get("briefing"), dict) else None),
+        "memory": ((payload.get("briefing") or {}).get("memory") if isinstance(payload.get("briefing"), dict) else None),
         "error_hash": payload.get("error_hash"),
     }
     path.write_text(json.dumps(_redact_payload(state), indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def _safe_briefing(briefing: dict[str, Any]) -> dict[str, Any]:
-    return {"status": briefing.get("status"), "work_item_count": briefing.get("work_item_count"), "selected_count": briefing.get("selected_count"), "llm": briefing.get("llm"), "briefing": briefing.get("briefing"), "selected_focus_items": briefing.get("selected_focus_items")}
+    return {"status": briefing.get("status"), "work_item_count": briefing.get("work_item_count"), "selected_count": briefing.get("selected_count"), "llm": briefing.get("llm"), "memory": briefing.get("memory"), "repo_visibility": briefing.get("repo_visibility"), "briefing": briefing.get("briefing"), "selected_focus_items": briefing.get("selected_focus_items")}
 
 
 def _safe_proposals(proposals: dict[str, Any]) -> dict[str, Any]:
@@ -273,6 +277,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--notification-channel-id", dest="notification_channel_id")
     parser.add_argument("--laptop-manifest-path", dest="laptop_manifest_path")
     parser.add_argument("--max-blocks", type=int, default=2, dest="max_blocks")
+    parser.add_argument("--no-memory", action="store_false", dest="use_memory", default=True)
     parser.add_argument("--db-path", dest="db_path")
     parser.add_argument("--calendar-state-db", dest="calendar_state_db")
     parser.add_argument("--scheduler-db", dest="scheduler_db")
@@ -286,7 +291,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    payload = run_coding_work_scheduler(planning_date=args.planning_date, live=args.live, notify=args.notify, notification_dry_run=args.notification_dry_run, notification_channel_id=args.notification_channel_id, laptop_manifest_path=args.laptop_manifest_path, max_blocks=args.max_blocks, db_path=args.db_path, calendar_state_db_path=args.calendar_state_db, scheduler_db_path=args.scheduler_db, ledger_path=args.ledger_path, state_file=args.state_file, lock_ttl_seconds=args.lock_ttl_seconds, write_audit=args.write_audit)
+    payload = run_coding_work_scheduler(planning_date=args.planning_date, live=args.live, notify=args.notify, notification_dry_run=args.notification_dry_run, notification_channel_id=args.notification_channel_id, laptop_manifest_path=args.laptop_manifest_path, max_blocks=args.max_blocks, use_memory=args.use_memory, db_path=args.db_path, calendar_state_db_path=args.calendar_state_db, scheduler_db_path=args.scheduler_db, ledger_path=args.ledger_path, state_file=args.state_file, lock_ttl_seconds=args.lock_ttl_seconds, write_audit=args.write_audit)
     if args.json_output:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
     else:

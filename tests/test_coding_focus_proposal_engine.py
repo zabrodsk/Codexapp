@@ -49,6 +49,30 @@ def test_coding_focus_proposal_description_contains_focus_context():
     assert "Idempotency key" in description
 
 
+def test_coding_focus_description_includes_fresh_signal_and_durable_context():
+    payload = build_coding_focus_proposals(
+        planning_date="2026-05-25",
+        work_items=[
+            _item(
+                fresh_signal="Recent Codex session updated today",
+                durable_context_summary="Rocky memory promotion uses guarded memory-promote.",
+                durable_open_loops=["Plan Sprint 030 propagation batch."],
+                memory_refs=["obsidian:openclaw-memory/projects/private-local-memory-os.md"],
+            )
+        ],
+        existing_events=[],
+        write_audit=False,
+    )
+
+    description = payload["proposals"][0]["metadata_description"]
+    assert "Fresh signal" in description
+    assert "Recent Codex session updated today" in description
+    assert "Durable context" in description
+    assert "guarded memory-promote" in description
+    assert "Open loop / decision" in description
+    assert "Sprint 030" in description
+
+
 def test_coding_focus_proposal_redacts_sensitive_description_text():
     payload = build_coding_focus_proposals(
         planning_date="2026-05-25",

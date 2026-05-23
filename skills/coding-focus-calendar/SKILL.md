@@ -14,7 +14,7 @@ Use this skill when Rocky should protect time for coding work.
 - Permissions: Apple Calendar read for proposals; Apple Calendar write only through live scheduler or explicit live command.
 - Side effects: creates only Rocky-owned `Rocky: Coding focus - ...` calendar blocks.
 - Booking policy: Monday-Thursday only, same-day only, minimum 60 minutes, no end after 19:30, no meeting moves.
-- Calendar description: includes focus, where Dusan left off, recommended next step, done signal, source refs, and Rocky metadata.
+- Calendar description: includes focus, fresh session signal, where Dusan left off, durable Obsidian context, open loop or decision, recommended next step, done signal, source refs, and Rocky metadata.
 - Safety: never include raw transcripts, diffs, secrets, tokens, cookies, credentials, or auth strings.
 
 ## Runtime
