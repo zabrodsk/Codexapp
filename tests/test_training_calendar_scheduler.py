@@ -287,3 +287,86 @@ def test_output_state_and_audit_redact_auth_like_strings(tmp_path):
     assert "webcal://secret-token.example/path" not in combined
     assert "secret-token" not in combined
     assert "redacted" in combined
+
+
+def test_scheduler_reconcile_source_ref_drift_records_alias(tmp_path):
+    state = AssistantCalendarState(tmp_path / "assistant_calendar.sqlite3")
+    state.record_created(
+        idempotency_key="rocky:training:2026-05-27:old",
+        calendar_name="Calendar",
+        title="Rocky: Training - Run: Recovery Run 60 min",
+        start="2026-05-27T08:00:00+02:00",
+        end="2026-05-27T10:30:00+02:00",
+        event_uid="uid-old",
+        create_audit_id="audit-old",
+        metadata={"source_refs": ["trainingpeaks:old"], "kind": "training"},
+    )
+    existing = [
+        {
+            "summary": "Rocky: Training - Run: Recovery Run 60 min",
+            "description": "Booked by: Rocky\nIdempotency key: rocky:training:2026-05-27:old",
+            "start_local": "2026-05-27 08:00:00",
+            "end_local": "2026-05-27 10:30:00",
+            "all_day": False,
+            "calendar": "Calendar",
+        }
+    ]
+
+    payload = run_training_calendar_scheduler(
+        planning_date="2026-05-23",
+        preview_payload=_preview([_workout(source_ref="trainingpeaks:new")]),
+        existing_events=existing,
+        health_payload=_ok_health(),
+        live=True,
+        reconcile=True,
+        fix_safe=True,
+        **_paths(tmp_path),
+    )
+
+    assert payload["status"] == "skipped_duplicate"
+    assert payload["reconcile_result"]["status"] == "ok"
+    assert payload["reconcile_result"]["result_statuses"] == ["source_ref_drift_verified"]
+    assert state.list_aliases(canonical_idempotency_key="rocky:training:2026-05-27:old")
+
+
+def test_scheduler_reconcile_manual_review_can_dry_run_notify(tmp_path):
+    state = AssistantCalendarState(tmp_path / "assistant_calendar.sqlite3")
+    state.record_created(
+        idempotency_key="rocky:training:2026-05-27:old",
+        calendar_name="Calendar",
+        title="Rocky: Training - Run: Recovery Run 60 min",
+        start="2026-05-27T08:00:00+02:00",
+        end="2026-05-27T10:30:00+02:00",
+        event_uid="uid-old",
+        create_audit_id="audit-old",
+        metadata={"source_refs": ["trainingpeaks:old"], "kind": "training"},
+    )
+    existing = [
+        {
+            "summary": "Rocky: Training - Run: Recovery Run 60 min",
+            "description": "Booked by: Rocky\nIdempotency key: rocky:training:2026-05-27:old",
+            "start_local": "2026-05-27 08:00:00",
+            "end_local": "2026-05-27 10:30:00",
+            "all_day": False,
+            "calendar": "Calendar",
+        }
+    ]
+
+    payload = run_training_calendar_scheduler(
+        planning_date="2026-05-23",
+        preview_payload=_preview([]),
+        existing_events=existing,
+        health_payload=_ok_health(),
+        live=True,
+        reconcile=True,
+        fix_safe=True,
+        notify_failures=True,
+        notification_dry_run=True,
+        **_paths(tmp_path),
+    )
+
+    assert payload["status"] == "blocked"
+    assert payload["reason"] == "training_calendar_reconcile_attention_needed"
+    assert payload["notification"]["status"] == "dry_run"
+    dead = AssistantSchedulerState(tmp_path / "assistant_scheduler.sqlite3").list_dead_letters()
+    assert dead[-1]["failure_class"] == "attention_needed"

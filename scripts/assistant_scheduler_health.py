@@ -26,12 +26,15 @@ TRAINING_CALENDAR_SSH_BRIDGE_PROGRAM_ARGUMENTS = [
     "-o",
     "StrictHostKeyChecking=accept-new",
     "localhost",
-    "cd /Users/clawdbot/.openclaw/workspace && /Users/clawdbot/.openclaw/workspace/.venv/bin/python scripts/training_calendar_scheduler.py --live --json",
+    "cd /Users/clawdbot/.openclaw/workspace && /Users/clawdbot/.openclaw/workspace/.venv/bin/python scripts/training_calendar_scheduler.py --live --reconcile --fix-safe --notify-failures --json",
 ]
 TRAINING_CALENDAR_DIRECT_PROGRAM_ARGUMENTS = [
     "/Users/clawdbot/.openclaw/workspace/.venv/bin/python",
     "/Users/clawdbot/.openclaw/workspace/scripts/training_calendar_scheduler.py",
     "--live",
+    "--reconcile",
+    "--fix-safe",
+    "--notify-failures",
     "--json",
 ]
 
@@ -146,7 +149,11 @@ def launchagent_execution_mode(program_arguments: list[str]) -> str:
     if (
         program_arguments[:1] == ["/usr/bin/ssh"]
         and "localhost" in program_arguments
-        and "training_calendar_scheduler.py --live --json" in joined
+        and "training_calendar_scheduler.py --live" in joined
+        and "--reconcile" in joined
+        and "--fix-safe" in joined
+        and "--notify-failures" in joined
+        and "--json" in joined
     ):
         return "localhost_ssh_bridge"
     if (
@@ -154,6 +161,9 @@ def launchagent_execution_mode(program_arguments: list[str]) -> str:
         and program_arguments[0].endswith("/python")
         and any(arg.endswith("training_calendar_scheduler.py") for arg in program_arguments)
         and "--live" in program_arguments
+        and "--reconcile" in program_arguments
+        and "--fix-safe" in program_arguments
+        and "--notify-failures" in program_arguments
         and "--json" in program_arguments
     ):
         return "direct_launchd_python"

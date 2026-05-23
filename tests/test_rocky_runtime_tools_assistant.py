@@ -23,7 +23,9 @@ from rocky_runtime_tools import (
     cmd_calendar_write_health,
     cmd_training_calendar_proposals,
     cmd_training_calendar_book,
+    cmd_training_calendar_reconcile,
     cmd_training_calendar_scheduler_run,
+    cmd_assistant_notification_dispatch,
     cmd_trainingpeaks_ics_preview,
     cmd_trainingpeaks_read_path_check,
 )
@@ -106,6 +108,10 @@ def test_parser_includes_assistant_commands():
         ["training-calendar-book", "--idempotency-key", "rocky:training:test"]
     ).command == "training-calendar-book"
     assert parser.parse_args(["training-calendar-scheduler-run"]).command == "training-calendar-scheduler-run"
+    assert parser.parse_args(["training-calendar-reconcile"]).command == "training-calendar-reconcile"
+    assert parser.parse_args(
+        ["assistant-notification-dispatch", "--status", "blocked", "--reason", "test", "--dry-run"]
+    ).command == "assistant-notification-dispatch"
 
 
 def test_calendar_policy_check_json_outputs_audit_id(tmp_path, capsys):
@@ -499,6 +505,11 @@ def test_training_calendar_scheduler_json_uses_scheduler_engine(tmp_path, capsys
                 calendar_name="Calendar",
                 max_bookings=1,
                 live=True,
+                reconcile=True,
+                fix_safe=True,
+                notify_failures=True,
+                notification_dry_run=True,
+                notification_channel_id="channel",
                 db_path=None,
                 calendar_state_db=None,
                 scheduler_db=str(tmp_path / "assistant_scheduler.sqlite3"),
@@ -515,6 +526,8 @@ def test_training_calendar_scheduler_json_uses_scheduler_engine(tmp_path, capsys
     assert payload["status"] == "skipped_duplicate"
     scheduler.assert_called_once()
     assert scheduler.call_args.kwargs["live"] is True
+    assert scheduler.call_args.kwargs["reconcile"] is True
+    assert scheduler.call_args.kwargs["notify_failures"] is True
 
 
 def test_calendar_tcc_probe_json_uses_probe_engine(capsys):
@@ -546,4 +559,64 @@ def test_runtime_deployable_files_include_training_calendar_modules():
     assert "scripts/training_calendar_proposal_engine.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/training_calendar_live_booking.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/training_calendar_scheduler.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/training_calendar_reconciler.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/assistant_notification_dispatcher.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/assistant_calendar_tcc_probe.py" in RUNTIME_DEPLOYABLE_FILES
+
+
+def test_training_calendar_reconcile_cli_uses_reconcile_path(tmp_path, capsys):
+    with patch(
+        "rocky_runtime_tools.reconcile_training_calendar",
+        return_value={
+            "status": "ok",
+            "reason": "training_calendar_reconciled",
+            "calendar_write_attempted": False,
+        },
+    ) as reconcile:
+        result = cmd_training_calendar_reconcile(
+            _args(
+                webcal_url_file="/tmp/webcal-secret",
+                planning_date="2026-05-23",
+                days_ahead=14,
+                calendar_name="Calendar",
+                fix_safe=True,
+                live=True,
+                notify_failures=True,
+                notification_dry_run=True,
+                notification_channel_id="channel",
+                db_path=None,
+                state_db=str(tmp_path / "assistant_calendar.sqlite3"),
+                scheduler_db=str(tmp_path / "assistant_scheduler.sqlite3"),
+                ledger_path=str(tmp_path / "assistant_audit.jsonl"),
+                json_output=True,
+            )
+        )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert payload["status"] == "ok"
+    reconcile.assert_called_once()
+    assert reconcile.call_args.kwargs["fix_safe"] is True
+    assert reconcile.call_args.kwargs["live"] is True
+
+
+def test_assistant_notification_dispatch_cli_dry_run(tmp_path, capsys):
+    result = cmd_assistant_notification_dispatch(
+        _args(
+            status="blocked",
+            reason="manual_review_required",
+            target_date="2026-05-27",
+            idempotency_key="rocky:training:test",
+            channel_id="channel",
+            config_path=str(tmp_path / "openclaw.json"),
+            ledger_path=str(tmp_path / "assistant_audit.jsonl"),
+            scheduler_db=str(tmp_path / "assistant_scheduler.sqlite3"),
+            dry_run=True,
+            json_output=True,
+        )
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert payload["status"] == "dry_run"
+    assert payload["notification_attempted"] is False

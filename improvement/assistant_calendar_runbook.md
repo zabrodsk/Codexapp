@@ -1,7 +1,7 @@
 # Rocky Assistant Calendar Runbook
 
-Sprint 3.1 hardens the manual live-write foundation for Rocky-owned Apple Calendar blocks.
-It does not enable scheduled proactive booking.
+Rocky can now automatically protect TrainingPeaks-derived weekday training blocks and reconcile them against Apple Calendar.
+The production scheduler still runs through the verified localhost SSH bridge because direct launchd Python remains blocked by macOS Calendar TCC.
 
 ## Safety Rules
 
@@ -10,7 +10,9 @@ It does not enable scheduled proactive booking.
 - Rocky may only delete events with `Rocky:` title, `Booked by: Rocky`, and matching idempotency key.
 - Never direct-write Apple Calendar SQLite.
 - Never proactively book Friday, Saturday, or Sunday.
-- Mission Control, Hermes Kanban, Betty LaunchAgents, cron, and new LaunchAgents are out of scope for Sprint 3.1.
+- Training reconciliation may only auto-fix narrowly safe cases: source-ref drift aliases and source-stable non-overlapping Monday-Thursday moves.
+- Training cancellations, weekend moves, ambiguous matches, conflicts, stale state, and non-Rocky events require manual review.
+- Mission Control, Hermes Kanban, Betty LaunchAgents, OpenClaw cron, TrainingPeaks MCP, browser automation, and TrainingPeaks writes are out of scope.
 
 ## Health Check
 
@@ -51,7 +53,11 @@ cd /Users/clawdbot/.openclaw/workspace
   --json
 ```
 
-The health output should report `execution_mode: localhost_ssh_bridge`, a clean stderr log, clean scheduler state, and available localhost SSH.
+The health output should report `execution_mode: localhost_ssh_bridge`, a clean stderr log, clean scheduler state, available localhost SSH, and the LaunchAgent command containing:
+
+```bash
+scripts/training_calendar_scheduler.py --live --reconcile --fix-safe --notify-failures --json
+```
 
 ## Status Check
 
@@ -103,6 +109,70 @@ cd /Users/clawdbot/.openclaw/workspace
 
 `--mark-stale` only updates `improvement/assistant_calendar.sqlite3`; it never edits Apple Calendar.
 
+## Training Calendar Reconcile
+
+Read-only TrainingPeaks versus Calendar reconciliation:
+
+```bash
+cd /Users/clawdbot/.openclaw/workspace
+/Users/clawdbot/.openclaw/workspace/.venv/bin/python scripts/rocky_runtime_tools.py \
+  training-calendar-reconcile \
+  --json
+```
+
+Apply only narrowly safe fixes:
+
+```bash
+cd /Users/clawdbot/.openclaw/workspace
+/Users/clawdbot/.openclaw/workspace/.venv/bin/python scripts/rocky_runtime_tools.py \
+  training-calendar-reconcile \
+  --fix-safe \
+  --live \
+  --json
+```
+
+Safe fixes:
+
+- `source_ref_drift_verified`: record an idempotency alias in Rocky state only; no Calendar write.
+- `moved_safe_fix_applied`: create the new Rocky block first, verify it, then delete the old Rocky block.
+
+Manual review:
+
+- `cancelled_candidate`
+- `weekend_policy_blocked`
+- `manual_review_required`
+- `calendar_state_stale`
+
+## Training Scheduler
+
+Manual production-equivalent run:
+
+```bash
+cd /Users/clawdbot/.openclaw/workspace
+/Users/clawdbot/.openclaw/workspace/.venv/bin/python scripts/rocky_runtime_tools.py \
+  training-calendar-scheduler-run \
+  --live \
+  --reconcile \
+  --fix-safe \
+  --notify-failures \
+  --json
+```
+
+Failure notifications go to Discord alert channel `1485710572325703901` by default.
+Normal no-op states such as `skipped_duplicate`, `skipped_no_workout`, and `source_ref_drift_verified` stay quiet.
+
+Notification dry-run:
+
+```bash
+cd /Users/clawdbot/.openclaw/workspace
+/Users/clawdbot/.openclaw/workspace/.venv/bin/python scripts/rocky_runtime_tools.py \
+  assistant-notification-dispatch \
+  --status blocked \
+  --reason manual_review_required \
+  --dry-run \
+  --json
+```
+
 ## Create A Manual Rocky Block
 
 ```bash
@@ -143,5 +213,8 @@ Sprint 3.1 therefore treats EventKit via Swift as the primary delete path and ke
 - If create fails with AppleScript/TCC errors, run `calendar-write-health --json` and inspect macOS Automation permissions for Calendar.
 - If delete fails with EventKit errors, run `calendar-write-health --json` and inspect Calendar permission status.
 - If status shows `stale_state_candidate`, run read-only reconcile first, then `--mark-stale` if the missing event is expected.
-- If status shows `orphan_calendar_event`, manually inspect Apple Calendar. Sprint 3.1 intentionally does not add force-delete behavior.
+- If training reconciliation reports `source_ref_drift_verified`, no Calendar action is needed; Rocky may record an alias from the current TrainingPeaks key to the canonical active block.
+- If training reconciliation reports `moved_safe_fix_applied`, inspect both the create and delete audit events.
+- If training reconciliation reports `cancelled_candidate` or `weekend_policy_blocked`, decide manually whether to delete or keep the existing block.
+- If status shows `orphan_calendar_event`, manually inspect Apple Calendar. Rocky intentionally does not add force-delete behavior.
 - Every successful live create/delete and every stale-state mutation must be traceable in `improvement/assistant_audit.jsonl`.

@@ -12,7 +12,7 @@ from typing import Any, Iterator
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CALENDAR_STATE_DB_PATH = ROOT / "improvement" / "assistant_calendar.sqlite3"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def utc_now_iso() -> str:
@@ -67,9 +67,26 @@ class AssistantCalendarState:
 
                 CREATE INDEX IF NOT EXISTS idx_assistant_calendar_blocks_status
                     ON assistant_calendar_blocks(status, calendar_name);
+
+                CREATE TABLE IF NOT EXISTS assistant_calendar_aliases (
+                    alias_idempotency_key TEXT PRIMARY KEY,
+                    canonical_idempotency_key TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_assistant_calendar_aliases_canonical
+                    ON assistant_calendar_aliases(canonical_idempotency_key);
                 """
             )
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    def get_schema_version(self) -> int:
+        with self.connect() as conn:
+            row = conn.execute("PRAGMA user_version").fetchone()
+        return int(row[0]) if row else 0
 
     def get(self, idempotency_key: str) -> dict[str, Any] | None:
         with self.connect() as conn:
@@ -199,3 +216,83 @@ class AssistantCalendarState:
                 (now, idempotency_key),
             )
         return self.get(idempotency_key)
+
+    def record_alias(
+        self,
+        *,
+        alias_idempotency_key: str,
+        canonical_idempotency_key: str,
+        reason: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        now = utc_now_iso()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO assistant_calendar_aliases (
+                    alias_idempotency_key, canonical_idempotency_key, reason,
+                    created_at, updated_at, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(alias_idempotency_key) DO UPDATE SET
+                    canonical_idempotency_key = excluded.canonical_idempotency_key,
+                    reason = excluded.reason,
+                    updated_at = excluded.updated_at,
+                    metadata_json = excluded.metadata_json
+                """,
+                (
+                    alias_idempotency_key,
+                    canonical_idempotency_key,
+                    reason,
+                    now,
+                    now,
+                    json_dumps(metadata or {}),
+                ),
+            )
+        return self.get_alias(alias_idempotency_key) or {
+            "alias_idempotency_key": alias_idempotency_key,
+            "canonical_idempotency_key": canonical_idempotency_key,
+        }
+
+    def get_alias(self, alias_idempotency_key: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM assistant_calendar_aliases
+                WHERE alias_idempotency_key = ?
+                """,
+                (alias_idempotency_key,),
+            ).fetchone()
+        return row_to_dict(row)
+
+    def resolve_alias(self, alias_idempotency_key: str) -> dict[str, Any] | None:
+        alias = self.get_alias(alias_idempotency_key)
+        if not alias:
+            return None
+        return self.get(str(alias["canonical_idempotency_key"]))
+
+    def list_aliases(
+        self,
+        *,
+        canonical_idempotency_key: str | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if canonical_idempotency_key:
+            clauses.append("canonical_idempotency_key = ?")
+            params.append(canonical_idempotency_key)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        limit_sql = "LIMIT ?" if limit is not None else ""
+        if limit is not None:
+            params.append(limit)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM assistant_calendar_aliases
+                {where}
+                ORDER BY updated_at DESC, created_at DESC
+                {limit_sql}
+                """,
+                params,
+            ).fetchall()
+        return [dict(row) for row in rows]

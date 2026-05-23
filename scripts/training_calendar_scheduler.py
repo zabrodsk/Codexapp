@@ -19,9 +19,11 @@ if str(SCRIPTS) not in sys.path:
 
 from assistant_audit_log import AssistantAuditLog
 from assistant_calendar_status import calendar_write_health
+from assistant_notification_dispatcher import dispatch_failure_notification
 from assistant_run_lock import acquire_run_lock, release_run_lock
 from assistant_scheduler_state import AssistantSchedulerState, utc_now_iso
 from training_calendar_live_booking import book_training_calendar_proposal
+from training_calendar_reconciler import reconcile_training_calendar
 from training_calendar_proposal_engine import (
     DEFAULT_DAYS_AHEAD,
     DEFAULT_TARGET_WORKING_DAYS,
@@ -67,6 +69,11 @@ def run_training_calendar_scheduler(
     preview_payload: dict[str, Any] | None = None,
     existing_events: list[dict[str, Any]] | None = None,
     health_payload: dict[str, Any] | None = None,
+    reconcile: bool = False,
+    fix_safe: bool = False,
+    notify_failures: bool = False,
+    notification_dry_run: bool = False,
+    notification_channel_id: str | None = None,
 ) -> dict[str, Any]:
     planning_day = _parse_date(planning_date) if planning_date else datetime.now(ZoneInfo("Europe/Prague")).date()
     target_day = add_working_days(planning_day, int(target_working_days))
@@ -98,6 +105,25 @@ def run_training_calendar_scheduler(
         return _redact_payload(payload)
 
     final_payload: dict[str, Any] | None = None
+    finish_context = {
+        "webcal_url_file": webcal_url_file,
+        "planning_date": planning_day.isoformat(),
+        "days_ahead": days_ahead,
+        "calendar_name": calendar_name,
+        "db_path": db_path,
+        "calendar_state_db_path": calendar_state_db_path,
+        "scheduler_db_path": scheduler_db_path,
+        "ledger_path": ledger_path,
+        "preview_payload": preview_payload,
+        "existing_events": existing_events,
+        "health_payload": health_payload,
+        "reconcile": bool(reconcile),
+        "fix_safe": bool(fix_safe),
+        "live": bool(live),
+        "notify_failures": bool(notify_failures),
+        "notification_dry_run": bool(notification_dry_run),
+        "notification_channel_id": notification_channel_id,
+    }
     try:
         if target_day.weekday() >= 4:
             final_payload = _base_payload(
@@ -115,6 +141,7 @@ def run_training_calendar_scheduler(
                 ledger_path=ledger_path,
                 state_file=state_file,
                 write_audit=write_audit,
+                finish_context=finish_context,
             )
 
         proposals = build_training_calendar_proposals(
@@ -147,6 +174,7 @@ def run_training_calendar_scheduler(
                 write_audit=write_audit,
                 dead_letter=True,
                 failure_class="trainingpeaks_read_failed",
+                finish_context=finish_context,
             )
 
         all_proposals = list(proposals.get("proposals") or [])
@@ -174,6 +202,7 @@ def run_training_calendar_scheduler(
                 ledger_path=ledger_path,
                 state_file=state_file,
                 write_audit=write_audit,
+                finish_context=finish_context,
             )
 
         if not eligible and len(duplicate_candidates) == 1:
@@ -197,6 +226,7 @@ def run_training_calendar_scheduler(
                 ledger_path=ledger_path,
                 state_file=state_file,
                 write_audit=write_audit,
+                finish_context=finish_context,
             )
 
         if len(eligible) > int(max_bookings) or len(bookable) > 1:
@@ -219,6 +249,7 @@ def run_training_calendar_scheduler(
                 write_audit=write_audit,
                 dead_letter=True,
                 failure_class="manual_review_required_multiple_training_proposals",
+                finish_context=finish_context,
             )
 
         if not bookable:
@@ -240,6 +271,7 @@ def run_training_calendar_scheduler(
                 write_audit=write_audit,
                 dead_letter=True,
                 failure_class=str(proposals.get("reason") or "no_bookable_training_proposal"),
+                finish_context=finish_context,
             )
 
         selected = bookable[0]
@@ -261,6 +293,7 @@ def run_training_calendar_scheduler(
                 ledger_path=ledger_path,
                 state_file=state_file,
                 write_audit=write_audit,
+                finish_context=finish_context,
             )
 
         health = health_payload
@@ -283,6 +316,7 @@ def run_training_calendar_scheduler(
                 write_audit=write_audit,
                 dead_letter=True,
                 failure_class="calendar_write_health_not_ok",
+                finish_context=finish_context,
             )
 
         booking = book_training_calendar_proposal(
@@ -321,6 +355,7 @@ def run_training_calendar_scheduler(
             write_audit=write_audit,
             dead_letter=final_payload["status"] not in success_statuses,
             failure_class=None if final_payload["status"] in success_statuses else str(final_payload["reason"] or "training_calendar_booking_failed"),
+            finish_context=finish_context,
         )
     except Exception as exc:
         final_payload = _base_payload(
@@ -343,6 +378,7 @@ def run_training_calendar_scheduler(
             write_audit=write_audit,
             dead_letter=True,
             failure_class="training_calendar_scheduler_exception",
+            finish_context=finish_context,
         )
     finally:
         release_run_lock(
@@ -363,7 +399,14 @@ def _finish_run(
     write_audit: bool,
     dead_letter: bool = False,
     failure_class: str | None = None,
+    finish_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    payload, dead_letter, failure_class = _apply_finish_followups(
+        payload,
+        dead_letter=dead_letter,
+        failure_class=failure_class,
+        finish_context=finish_context or {},
+    )
     safe_payload = _redact_payload(payload)
     status = str(safe_payload.get("status") or "unknown")
     reason = str(safe_payload.get("reason") or status)
@@ -415,7 +458,86 @@ def _finish_run(
     )
     if state_file:
         _write_state_file(Path(state_file), safe_payload)
+    notification = _dispatch_failure_notification_if_needed(
+        safe_payload,
+        enabled=bool((finish_context or {}).get("notify_failures")),
+        dry_run=bool((finish_context or {}).get("notification_dry_run")),
+        channel_id=(finish_context or {}).get("notification_channel_id"),
+        ledger_path=ledger_path,
+        scheduler_db_path=scheduler_db_path,
+    )
+    if notification:
+        safe_payload["notification"] = notification
     return safe_payload
+
+
+def _apply_finish_followups(
+    payload: dict[str, Any],
+    *,
+    dead_letter: bool,
+    failure_class: str | None,
+    finish_context: dict[str, Any],
+) -> tuple[dict[str, Any], bool, str | None]:
+    if not finish_context.get("reconcile"):
+        return payload, dead_letter, failure_class
+    reconcile_payload = reconcile_training_calendar(
+        webcal_url_file=finish_context.get("webcal_url_file", DEFAULT_WEBCAL_URL_FILE),
+        planning_date=finish_context.get("planning_date"),
+        days_ahead=int(finish_context.get("days_ahead") or DEFAULT_DAYS_AHEAD),
+        calendar_name=finish_context.get("calendar_name") or DEFAULT_CALENDAR_NAME,
+        fix_safe=bool(finish_context.get("fix_safe")),
+        live=bool(finish_context.get("live")),
+        notify_failures=False,
+        db_path=finish_context.get("db_path"),
+        state_db_path=finish_context.get("calendar_state_db_path"),
+        scheduler_db_path=finish_context.get("scheduler_db_path"),
+        ledger_path=finish_context.get("ledger_path"),
+        preview_payload=finish_context.get("preview_payload"),
+        existing_events=finish_context.get("existing_events"),
+        health_payload=finish_context.get("health_payload"),
+    )
+    payload["reconcile_result"] = _safe_reconcile_summary(reconcile_payload)
+    payload["calendar_write_attempted"] = bool(payload.get("calendar_write_attempted")) or bool(reconcile_payload.get("calendar_write_attempted"))
+    if reconcile_payload.get("status") in {"blocked", "failed", "manual_review_required"}:
+        payload["status"] = "blocked"
+        payload["reason"] = "training_calendar_reconcile_attention_needed"
+        payload["blocked_count"] = 1
+        payload["manual_review_required"] = True
+        dead_letter = True
+        failure_class = str(reconcile_payload.get("reason") or "training_calendar_reconcile_attention_needed")
+    return payload, dead_letter, failure_class
+
+
+def _safe_reconcile_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    return _redact_payload(
+        {
+            "status": payload.get("status"),
+            "reason": payload.get("reason"),
+            "manual_review_required": payload.get("manual_review_required"),
+            "calendar_write_attempted": payload.get("calendar_write_attempted"),
+            "result_statuses": [result.get("status") for result in payload.get("results", [])],
+        }
+    )
+
+
+def _dispatch_failure_notification_if_needed(
+    payload: dict[str, Any],
+    *,
+    enabled: bool,
+    dry_run: bool,
+    channel_id: str | None,
+    ledger_path: str | Path | None,
+    scheduler_db_path: str | Path | None,
+) -> dict[str, Any] | None:
+    if not enabled:
+        return None
+    return dispatch_failure_notification(
+        payload,
+        channel_id=channel_id or "1485710572325703901",
+        ledger_path=ledger_path,
+        scheduler_db_path=scheduler_db_path,
+        dry_run=dry_run,
+    )
 
 
 def _base_payload(
@@ -611,6 +733,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-file", default=str(DEFAULT_STATE_FILE), dest="state_file")
     parser.add_argument("--lock-ttl-seconds", type=int, default=DEFAULT_LOCK_TTL_SECONDS, dest="lock_ttl_seconds")
     parser.add_argument("--live", action="store_true")
+    parser.add_argument("--reconcile", action="store_true", help="Run TrainingPeaks/Calendar reconciliation after booking.")
+    parser.add_argument("--fix-safe", action="store_true", dest="fix_safe", help="Apply narrowly safe reconciliation fixes when --live is set.")
+    parser.add_argument("--notify-failures", action="store_true", dest="notify_failures", help="Send failure/manual-review notifications.")
+    parser.add_argument("--notification-dry-run", action="store_true", dest="notification_dry_run")
+    parser.add_argument("--notification-channel-id", dest="notification_channel_id")
     parser.add_argument("--no-write-audit", action="store_false", dest="write_audit", default=True)
     parser.add_argument("--json", action="store_true", dest="json_output")
     return parser
@@ -633,6 +760,11 @@ def main(argv: list[str] | None = None) -> int:
         state_file=args.state_file,
         lock_ttl_seconds=args.lock_ttl_seconds,
         write_audit=args.write_audit,
+        reconcile=args.reconcile,
+        fix_safe=args.fix_safe,
+        notify_failures=args.notify_failures,
+        notification_dry_run=args.notification_dry_run,
+        notification_channel_id=args.notification_channel_id,
     )
     if args.json_output:
         print(json.dumps(payload, indent=2, ensure_ascii=False))

@@ -91,11 +91,13 @@ from assistant_calendar_status import (
 )
 from assistant_calendar_tcc_probe import build_calendar_tcc_probe
 from assistant_calendar_writer import create_calendar_block, delete_calendar_block
+from assistant_notification_dispatcher import dispatch_failure_notification
 from assistant_run_lock import smoke_lock_cycle
 from assistant_scheduler_health import evaluate_all_scheduler_jobs, format_scheduler_health_report
 from assistant_scheduler_state import AssistantSchedulerState
 from training_calendar_live_booking import book_training_calendar_proposal
 from training_calendar_proposal_engine import build_training_calendar_proposals
+from training_calendar_reconciler import reconcile_training_calendar
 from training_calendar_scheduler import run_training_calendar_scheduler
 from trainingpeaks_ics_reader import preview_ics_file, preview_webcal_url_file
 from trainingpeaks_read_path_probe import probe_trainingpeaks_read_paths
@@ -119,12 +121,14 @@ RUNTIME_DEPLOYABLE_FILES = (
     "scripts/assistant_calendar_tcc_probe.py",
     "scripts/assistant_calendar_writer.py",
     "scripts/assistant_launchd.py",
+    "scripts/assistant_notification_dispatcher.py",
     "scripts/assistant_run_lock.py",
     "scripts/assistant_scheduler_health.py",
     "scripts/assistant_scheduler_health_launcher.py",
     "scripts/assistant_scheduler_state.py",
     "scripts/training_calendar_live_booking.py",
     "scripts/training_calendar_proposal_engine.py",
+    "scripts/training_calendar_reconciler.py",
     "scripts/training_calendar_scheduler.py",
     "scripts/trainingpeaks_ics_reader.py",
     "scripts/trainingpeaks_read_path_probe.py",
@@ -628,6 +632,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     training_scheduler.add_argument("--lock-ttl-seconds", type=int, default=1800, dest="lock_ttl_seconds", help="Duplicate-run lock TTL in seconds.")
     training_scheduler.add_argument("--live", action="store_true", help="Enable live Apple Calendar writes through existing booking rails.")
+    training_scheduler.add_argument("--reconcile", action="store_true", help="Run TrainingPeaks/Calendar reconciliation after scheduler booking.")
+    training_scheduler.add_argument("--fix-safe", action="store_true", dest="fix_safe", help="Apply narrowly safe reconciliation fixes when --live is set.")
+    training_scheduler.add_argument("--notify-failures", action="store_true", dest="notify_failures", help="Send failure/manual-review notifications.")
+    training_scheduler.add_argument("--notification-dry-run", action="store_true", dest="notification_dry_run")
+    training_scheduler.add_argument("--notification-channel-id", dest="notification_channel_id")
     training_scheduler.add_argument(
         "--no-write-audit",
         action="store_false",
@@ -641,6 +650,45 @@ def build_parser() -> argparse.ArgumentParser:
         dest="json_output",
         help="Output raw JSON instead of a human-readable summary.",
     )
+
+    training_reconcile = sub.add_parser(
+        "training-calendar-reconcile",
+        help="Reconcile current TrainingPeaks workouts with Rocky-owned Calendar blocks.",
+    )
+    training_reconcile.add_argument(
+        "--webcal-url-file",
+        default="/Users/clawdbot/.openclaw/secrets/trainingpeaks-webcal-url",
+        dest="webcal_url_file",
+        help="Secret file containing the TrainingPeaks webcal URL.",
+    )
+    training_reconcile.add_argument("--planning-date", dest="planning_date")
+    training_reconcile.add_argument("--days-ahead", type=int, default=14, dest="days_ahead")
+    training_reconcile.add_argument("--calendar", default="Calendar", dest="calendar_name")
+    training_reconcile.add_argument("--db-path", dest="db_path")
+    training_reconcile.add_argument("--state-db", dest="state_db")
+    training_reconcile.add_argument("--scheduler-db", dest="scheduler_db")
+    training_reconcile.add_argument("--ledger-path", dest="ledger_path")
+    training_reconcile.add_argument("--fix-safe", action="store_true", dest="fix_safe")
+    training_reconcile.add_argument("--live", action="store_true")
+    training_reconcile.add_argument("--notify-failures", action="store_true", dest="notify_failures")
+    training_reconcile.add_argument("--notification-dry-run", action="store_true", dest="notification_dry_run")
+    training_reconcile.add_argument("--notification-channel-id", dest="notification_channel_id")
+    training_reconcile.add_argument("--json", action="store_true", dest="json_output")
+
+    notification_dispatch = sub.add_parser(
+        "assistant-notification-dispatch",
+        help="Dispatch or dry-run a safe assistant failure notification.",
+    )
+    notification_dispatch.add_argument("--status", required=True)
+    notification_dispatch.add_argument("--reason", required=True)
+    notification_dispatch.add_argument("--target-date", dest="target_date")
+    notification_dispatch.add_argument("--idempotency-key", dest="idempotency_key")
+    notification_dispatch.add_argument("--channel-id", default="1485710572325703901", dest="channel_id")
+    notification_dispatch.add_argument("--config-path", default="/Users/clawdbot/.openclaw/openclaw.json", dest="config_path")
+    notification_dispatch.add_argument("--ledger-path", dest="ledger_path")
+    notification_dispatch.add_argument("--scheduler-db", dest="scheduler_db")
+    notification_dispatch.add_argument("--dry-run", action="store_true", dest="dry_run")
+    notification_dispatch.add_argument("--json", action="store_true", dest="json_output")
 
     scheduler_health = sub.add_parser(
         "assistant-scheduler-health",
@@ -2253,6 +2301,11 @@ def cmd_training_calendar_scheduler_run(args) -> int:
         state_file=args.state_file,
         lock_ttl_seconds=args.lock_ttl_seconds,
         write_audit=args.write_audit,
+        reconcile=args.reconcile,
+        fix_safe=args.fix_safe,
+        notify_failures=args.notify_failures,
+        notification_dry_run=args.notification_dry_run,
+        notification_channel_id=args.notification_channel_id,
     )
     if args.json_output:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -2272,6 +2325,53 @@ def cmd_training_calendar_scheduler_run(args) -> int:
     }:
         return 0
     return 1
+
+
+def cmd_training_calendar_reconcile(args) -> int:
+    payload = reconcile_training_calendar(
+        webcal_url_file=args.webcal_url_file,
+        planning_date=args.planning_date,
+        days_ahead=args.days_ahead,
+        calendar_name=args.calendar_name,
+        fix_safe=args.fix_safe,
+        live=args.live,
+        notify_failures=args.notify_failures,
+        notification_dry_run=args.notification_dry_run,
+        notification_channel_id=args.notification_channel_id,
+        db_path=args.db_path,
+        state_db_path=args.state_db,
+        scheduler_db_path=args.scheduler_db,
+        ledger_path=args.ledger_path,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Training calendar reconcile: {payload.get('status')}")
+        print(f"Reason: {payload.get('reason')}")
+        print(f"Calendar write attempted: {payload.get('calendar_write_attempted')}")
+    return 1 if payload.get("status") in {"blocked", "failed", "manual_review_required"} else 0
+
+
+def cmd_assistant_notification_dispatch(args) -> int:
+    payload = dispatch_failure_notification(
+        {
+            "status": args.status,
+            "reason": args.reason,
+            "target_date": args.target_date,
+            "idempotency_key": args.idempotency_key,
+        },
+        channel_id=args.channel_id,
+        config_path=args.config_path,
+        ledger_path=args.ledger_path,
+        scheduler_db_path=args.scheduler_db,
+        dry_run=args.dry_run,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Assistant notification: {payload.get('status')}")
+        print(f"Reason: {payload.get('reason')}")
+    return 0 if payload.get("status") in {"posted", "dry_run", "skipped"} else 1
 
 
 def cmd_calendar_tcc_probe(args) -> int:
@@ -2535,6 +2635,8 @@ def main() -> int:
         "training-calendar-proposals": cmd_training_calendar_proposals,
         "training-calendar-book": cmd_training_calendar_book,
         "training-calendar-scheduler-run": cmd_training_calendar_scheduler_run,
+        "training-calendar-reconcile": cmd_training_calendar_reconcile,
+        "assistant-notification-dispatch": cmd_assistant_notification_dispatch,
         "assistant-scheduler-health": cmd_assistant_scheduler_health,
         "assistant-dead-letters": cmd_assistant_dead_letters,
         "assistant-lock-smoke": cmd_assistant_lock_smoke,

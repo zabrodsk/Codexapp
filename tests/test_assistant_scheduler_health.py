@@ -161,6 +161,9 @@ def test_training_calendar_booking_launchagent_spec_matches_production_schedule(
     assert spec.workflow == "training_calendar_scheduler"
     assert spec.launchagent.label == "com.openclaw.rocky-training-calendar-booking"
     assert spec.launchagent.program_arguments == TRAINING_CALENDAR_SSH_BRIDGE_PROGRAM_ARGUMENTS
+    assert "--reconcile" in " ".join(spec.launchagent.program_arguments)
+    assert "--fix-safe" in " ".join(spec.launchagent.program_arguments)
+    assert "--notify-failures" in " ".join(spec.launchagent.program_arguments)
     assert launchagent_execution_mode(spec.launchagent.program_arguments) == "localhost_ssh_bridge"
     assert launchagent_execution_mode(TRAINING_CALENDAR_DIRECT_PROGRAM_ARGUMENTS) == "direct_launchd_python"
     assert spec.launchagent.working_directory == "/Users/clawdbot/.openclaw/workspace"
