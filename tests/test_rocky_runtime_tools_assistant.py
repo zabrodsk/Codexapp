@@ -19,9 +19,11 @@ from rocky_runtime_tools import (
     cmd_calendar_block_status,
     cmd_calendar_dry_run,
     cmd_calendar_policy_check,
+    cmd_calendar_tcc_probe,
     cmd_calendar_write_health,
     cmd_training_calendar_proposals,
     cmd_training_calendar_book,
+    cmd_training_calendar_scheduler_run,
     cmd_trainingpeaks_ics_preview,
     cmd_trainingpeaks_read_path_check,
 )
@@ -94,6 +96,7 @@ def test_parser_includes_assistant_commands():
     ).command == "calendar-block-status"
     assert parser.parse_args(["calendar-block-reconcile"]).command == "calendar-block-reconcile"
     assert parser.parse_args(["calendar-write-health"]).command == "calendar-write-health"
+    assert parser.parse_args(["calendar-tcc-probe"]).command == "calendar-tcc-probe"
     assert parser.parse_args(["trainingpeaks-read-path-check"]).command == "trainingpeaks-read-path-check"
     assert parser.parse_args(
         ["trainingpeaks-ics-preview", "--ics-file", "/tmp/trainingpeaks.ics"]
@@ -102,6 +105,7 @@ def test_parser_includes_assistant_commands():
     assert parser.parse_args(
         ["training-calendar-book", "--idempotency-key", "rocky:training:test"]
     ).command == "training-calendar-book"
+    assert parser.parse_args(["training-calendar-scheduler-run"]).command == "training-calendar-scheduler-run"
 
 
 def test_calendar_policy_check_json_outputs_audit_id(tmp_path, capsys):
@@ -476,8 +480,70 @@ def test_training_calendar_book_json_uses_live_booking_engine(tmp_path, capsys):
     assert book.call_args.kwargs["live"] is True
 
 
+def test_training_calendar_scheduler_json_uses_scheduler_engine(tmp_path, capsys):
+    with patch(
+        "rocky_runtime_tools.run_training_calendar_scheduler",
+        return_value={
+            "status": "skipped_duplicate",
+            "reason": "duplicate_existing_active_event",
+            "target_date": "2026-05-27",
+            "calendar_write_attempted": False,
+        },
+    ) as scheduler:
+        result = cmd_training_calendar_scheduler_run(
+            _args(
+                webcal_url_file=str(tmp_path / "trainingpeaks-webcal-url"),
+                planning_date="2026-05-23",
+                target_working_days=3,
+                days_ahead=14,
+                calendar_name="Calendar",
+                max_bookings=1,
+                live=True,
+                db_path=None,
+                calendar_state_db=None,
+                scheduler_db=str(tmp_path / "assistant_scheduler.sqlite3"),
+                ledger_path=str(tmp_path / "assistant_audit.jsonl"),
+                state_file=str(tmp_path / "training_calendar_scheduler.json"),
+                lock_ttl_seconds=1800,
+                write_audit=True,
+                json_output=True,
+            )
+        )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert payload["status"] == "skipped_duplicate"
+    scheduler.assert_called_once()
+    assert scheduler.call_args.kwargs["live"] is True
+
+
+def test_calendar_tcc_probe_json_uses_probe_engine(capsys):
+    with patch(
+        "rocky_runtime_tools.build_calendar_tcc_probe",
+        return_value={
+            "status": "blocked",
+            "failure_class": "calendar_tcc_blocked",
+            "calendar_write_attempted": False,
+        },
+    ) as probe:
+        result = cmd_calendar_tcc_probe(
+            _args(
+                db_path=None,
+                json_output=True,
+            )
+        )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 1
+    assert payload["failure_class"] == "calendar_tcc_blocked"
+    assert payload["calendar_write_attempted"] is False
+    probe.assert_called_once()
+
+
 def test_runtime_deployable_files_include_training_calendar_modules():
     from rocky_runtime_tools import RUNTIME_DEPLOYABLE_FILES
 
     assert "scripts/training_calendar_proposal_engine.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/training_calendar_live_booking.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/training_calendar_scheduler.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/assistant_calendar_tcc_probe.py" in RUNTIME_DEPLOYABLE_FILES

@@ -50,6 +50,26 @@ def test_audit_log_records_required_fields_and_redacts_sensitive_values(tmp_path
     assert row["artifacts"]["safe"] == "ok"
 
 
+def test_audit_log_redacts_auth_like_source_strings(tmp_path):
+    ledger_path = tmp_path / "assistant_audit.jsonl"
+    ledger = AssistantAuditLog(ledger_path)
+
+    ledger.record_event(
+        event_type="calendar.proposal_created",
+        workflow="calendar_dry_run",
+        idempotency_key="rocky:test:key",
+        policy_version="test-policy",
+        decision="created",
+        reason="test",
+        sources=["webcal://secret-token.example/path"],
+    )
+
+    text = ledger_path.read_text()
+    row = json.loads(text.splitlines()[0])
+    assert "webcal://secret-token.example/path" not in text
+    assert row["sources"][0]["redacted"] is True
+
+
 def test_audit_log_is_append_only(tmp_path):
     ledger_path = tmp_path / "assistant_audit.jsonl"
     ledger = AssistantAuditLog(ledger_path)

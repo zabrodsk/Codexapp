@@ -89,12 +89,14 @@ from assistant_calendar_status import (
     inspect_calendar_block,
     reconcile_calendar_blocks,
 )
+from assistant_calendar_tcc_probe import build_calendar_tcc_probe
 from assistant_calendar_writer import create_calendar_block, delete_calendar_block
 from assistant_run_lock import smoke_lock_cycle
 from assistant_scheduler_health import evaluate_all_scheduler_jobs, format_scheduler_health_report
 from assistant_scheduler_state import AssistantSchedulerState
 from training_calendar_live_booking import book_training_calendar_proposal
 from training_calendar_proposal_engine import build_training_calendar_proposals
+from training_calendar_scheduler import run_training_calendar_scheduler
 from trainingpeaks_ics_reader import preview_ics_file, preview_webcal_url_file
 from trainingpeaks_read_path_probe import probe_trainingpeaks_read_paths
 
@@ -114,6 +116,7 @@ RUNTIME_DEPLOYABLE_FILES = (
     "scripts/assistant_calendar_policy.py",
     "scripts/assistant_calendar_state.py",
     "scripts/assistant_calendar_status.py",
+    "scripts/assistant_calendar_tcc_probe.py",
     "scripts/assistant_calendar_writer.py",
     "scripts/assistant_launchd.py",
     "scripts/assistant_run_lock.py",
@@ -122,6 +125,7 @@ RUNTIME_DEPLOYABLE_FILES = (
     "scripts/assistant_scheduler_state.py",
     "scripts/training_calendar_live_booking.py",
     "scripts/training_calendar_proposal_engine.py",
+    "scripts/training_calendar_scheduler.py",
     "scripts/trainingpeaks_ics_reader.py",
     "scripts/trainingpeaks_read_path_probe.py",
     "tests/test_runtime_integration.py",
@@ -497,6 +501,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output raw JSON instead of a human-readable summary.",
     )
 
+    tcc_probe = sub.add_parser(
+        "calendar-tcc-probe",
+        help="Run read-only Calendar/TCC permission diagnostics for the current execution context.",
+    )
+    tcc_probe.add_argument("--db-path", dest="db_path", help="Optional Apple Calendar SQLite path.")
+    tcc_probe.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Output raw JSON instead of a human-readable summary.",
+    )
+
     tp_check = sub.add_parser(
         "trainingpeaks-read-path-check",
         help="Check read-only TrainingPeaks planned-workout source availability.",
@@ -579,6 +595,47 @@ def build_parser() -> argparse.ArgumentParser:
     training_book.add_argument("--ledger-path", dest="ledger_path", help="Optional assistant audit JSONL path.")
     training_book.add_argument("--live", action="store_true", help="Required guard for live Apple Calendar writes.")
     training_book.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Output raw JSON instead of a human-readable summary.",
+    )
+
+    training_scheduler = sub.add_parser(
+        "training-calendar-scheduler-run",
+        help="Run automatic TrainingPeaks-derived training calendar booking scheduler.",
+    )
+    training_scheduler.add_argument(
+        "--webcal-url-file",
+        default="/Users/clawdbot/.openclaw/secrets/trainingpeaks-webcal-url",
+        dest="webcal_url_file",
+        help="Secret file containing the TrainingPeaks webcal URL.",
+    )
+    training_scheduler.add_argument("--planning-date", dest="planning_date", help="Optional local planning date in YYYY-MM-DD format.")
+    training_scheduler.add_argument("--target-working-days", type=int, default=3, dest="target_working_days", help="Working days ahead to target (default: 3).")
+    training_scheduler.add_argument("--days-ahead", type=int, default=14, dest="days_ahead", help="Number of TrainingPeaks days to preview (default: 14).")
+    training_scheduler.add_argument("--calendar", default="Calendar", dest="calendar_name", help="Apple Calendar name (default: Calendar).")
+    training_scheduler.add_argument("--max-bookings", type=int, default=1, dest="max_bookings", help="Maximum automatic bookings per run (default: 1).")
+    training_scheduler.add_argument("--db-path", dest="db_path", help="Optional Apple Calendar SQLite path.")
+    training_scheduler.add_argument("--calendar-state-db", dest="calendar_state_db", help="Optional assistant calendar SQLite path.")
+    training_scheduler.add_argument("--scheduler-db", dest="scheduler_db", help="Optional assistant scheduler SQLite path.")
+    training_scheduler.add_argument("--ledger-path", dest="ledger_path", help="Optional assistant audit JSONL path.")
+    training_scheduler.add_argument(
+        "--state-file",
+        default="/Users/clawdbot/.openclaw/state/training_calendar_scheduler.json",
+        dest="state_file",
+        help="Safe scheduler state JSON path.",
+    )
+    training_scheduler.add_argument("--lock-ttl-seconds", type=int, default=1800, dest="lock_ttl_seconds", help="Duplicate-run lock TTL in seconds.")
+    training_scheduler.add_argument("--live", action="store_true", help="Enable live Apple Calendar writes through existing booking rails.")
+    training_scheduler.add_argument(
+        "--no-write-audit",
+        action="store_false",
+        dest="write_audit",
+        default=True,
+        help="Do not append assistant audit events.",
+    )
+    training_scheduler.add_argument(
         "--json",
         action="store_true",
         dest="json_output",
@@ -2180,6 +2237,55 @@ def cmd_training_calendar_book(args) -> int:
     return 2 if payload.get("reason") == "live_flag_required" else 1
 
 
+def cmd_training_calendar_scheduler_run(args) -> int:
+    payload = run_training_calendar_scheduler(
+        webcal_url_file=args.webcal_url_file,
+        planning_date=args.planning_date,
+        target_working_days=args.target_working_days,
+        days_ahead=args.days_ahead,
+        calendar_name=args.calendar_name,
+        max_bookings=args.max_bookings,
+        live=args.live,
+        db_path=args.db_path,
+        calendar_state_db_path=args.calendar_state_db,
+        scheduler_db_path=args.scheduler_db,
+        ledger_path=args.ledger_path,
+        state_file=args.state_file,
+        lock_ttl_seconds=args.lock_ttl_seconds,
+        write_audit=args.write_audit,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Training calendar scheduler: {payload.get('status')}")
+        print(f"Reason: {payload.get('reason')}")
+        print(f"Target date: {payload.get('target_date')}")
+        print(f"Calendar write attempted: {payload.get('calendar_write_attempted')}")
+        if payload.get("audit_id"):
+            print(f"Audit ID: {payload.get('audit_id')}")
+    if payload.get("status") in {
+        "created",
+        "skipped_duplicate",
+        "skipped_no_workout",
+        "skipped_weekend_target",
+        "dry_run_proposal",
+    }:
+        return 0
+    return 1
+
+
+def cmd_calendar_tcc_probe(args) -> int:
+    payload = build_calendar_tcc_probe(db_path=args.db_path)
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Calendar TCC probe: {payload.get('status')}")
+        print(f"Failure class: {payload.get('failure_class')}")
+        print(f"Context: {(payload.get('context') or {}).get('execution_context')}")
+        print(f"Recommendation: {payload.get('recommendation')}")
+    return 0 if payload.get("status") == "ok" else 1
+
+
 def cmd_assistant_scheduler_health(args) -> int:
     payload = evaluate_all_scheduler_jobs(
         job_name=args.job,
@@ -2423,10 +2529,12 @@ def main() -> int:
         "calendar-block-status": cmd_calendar_block_status,
         "calendar-block-reconcile": cmd_calendar_block_reconcile,
         "calendar-write-health": cmd_calendar_write_health,
+        "calendar-tcc-probe": cmd_calendar_tcc_probe,
         "trainingpeaks-read-path-check": cmd_trainingpeaks_read_path_check,
         "trainingpeaks-ics-preview": cmd_trainingpeaks_ics_preview,
         "training-calendar-proposals": cmd_training_calendar_proposals,
         "training-calendar-book": cmd_training_calendar_book,
+        "training-calendar-scheduler-run": cmd_training_calendar_scheduler_run,
         "assistant-scheduler-health": cmd_assistant_scheduler_health,
         "assistant-dead-letters": cmd_assistant_dead_letters,
         "assistant-lock-smoke": cmd_assistant_lock_smoke,

@@ -3,6 +3,7 @@ import plistlib
 import sys
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 
@@ -12,7 +13,15 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from assistant_launchd import LaunchAgentSpec
-from assistant_scheduler_health import SchedulerJobSpec, evaluate_scheduler_job
+from assistant_scheduler_health import (
+    JOB_REGISTRY,
+    TRAINING_CALENDAR_DIRECT_PROGRAM_ARGUMENTS,
+    TRAINING_CALENDAR_BOOKING_SPEC,
+    TRAINING_CALENDAR_SSH_BRIDGE_PROGRAM_ARGUMENTS,
+    SchedulerJobSpec,
+    evaluate_scheduler_job,
+    launchagent_execution_mode,
+)
 
 
 def _write_jobs(path: Path, *, enabled: bool):
@@ -143,3 +152,101 @@ def test_program_mismatch_blocks(tmp_path):
 
     assert payload["status"] == "blocked"
     assert payload["failure_class"] == "launchagent_program_mismatch"
+
+
+def test_training_calendar_booking_launchagent_spec_matches_production_schedule():
+    spec = TRAINING_CALENDAR_BOOKING_SPEC
+
+    assert JOB_REGISTRY["training_calendar_booking"] is spec
+    assert spec.workflow == "training_calendar_scheduler"
+    assert spec.launchagent.label == "com.openclaw.rocky-training-calendar-booking"
+    assert spec.launchagent.program_arguments == TRAINING_CALENDAR_SSH_BRIDGE_PROGRAM_ARGUMENTS
+    assert launchagent_execution_mode(spec.launchagent.program_arguments) == "localhost_ssh_bridge"
+    assert launchagent_execution_mode(TRAINING_CALENDAR_DIRECT_PROGRAM_ARGUMENTS) == "direct_launchd_python"
+    assert spec.launchagent.working_directory == "/Users/clawdbot/.openclaw/workspace"
+    assert spec.launchagent.stdout_path == "/Users/clawdbot/.openclaw/logs/rocky-training-calendar-booking.log"
+    assert spec.launchagent.stderr_path == "/Users/clawdbot/.openclaw/logs/rocky-training-calendar-booking.err.log"
+    assert spec.launchagent.weekdays == [1, 2, 3, 4, 5]
+    assert spec.launchagent.hour == 6
+    assert spec.launchagent.minute == 30
+    assert spec.state_path == "/Users/clawdbot/.openclaw/state/training_calendar_scheduler.json"
+
+
+def test_training_calendar_health_reports_ssh_bridge_mode(tmp_path):
+    spec = _spec(tmp_path)
+    spec = SchedulerJobSpec(
+        job_name="training_calendar_booking",
+        job_label="Rocky training calendar booking",
+        workflow="training_calendar_scheduler",
+        launchagent=type(spec.launchagent)(
+            label=spec.launchagent.label,
+            plist_path=spec.launchagent.plist_path,
+            program_arguments=TRAINING_CALENDAR_SSH_BRIDGE_PROGRAM_ARGUMENTS,
+            working_directory=spec.launchagent.working_directory,
+            stdout_path=spec.launchagent.stdout_path,
+            stderr_path=spec.launchagent.stderr_path,
+            weekdays=spec.launchagent.weekdays,
+            hour=spec.launchagent.hour,
+            minute=spec.launchagent.minute,
+            timezone=spec.launchagent.timezone,
+            first_expected_run_after=spec.launchagent.first_expected_run_after,
+        ),
+        state_path=str(tmp_path / "state.json"),
+    )
+    plist = plistlib.loads(Path(spec.launchagent.plist_path).read_bytes())
+    plist["ProgramArguments"] = TRAINING_CALENDAR_SSH_BRIDGE_PROGRAM_ARGUMENTS
+    Path(spec.launchagent.plist_path).write_bytes(plistlib.dumps(plist))
+
+    with patch("assistant_scheduler_health._localhost_ssh_status", return_value={"status": "ok"}):
+        payload = evaluate_scheduler_job(
+            spec,
+            now=datetime(2026, 5, 22, 12, 0, tzinfo=ZoneInfo("Europe/Prague")),
+            write_state=False,
+            write_audit=False,
+            launchctl_text="state = not running\nruns = 0\nlast exit code = (never exited)\n",
+        )
+
+    assert payload["status"] == "healthy"
+    assert payload["execution_mode"] == "localhost_ssh_bridge"
+    assert payload["signals"]["localhost_ssh_bridge"]["status"] == "ok"
+
+
+def test_training_calendar_health_blocks_when_ssh_bridge_unavailable(tmp_path):
+    spec = _spec(tmp_path)
+    spec = SchedulerJobSpec(
+        job_name="training_calendar_booking",
+        job_label="Rocky training calendar booking",
+        workflow="training_calendar_scheduler",
+        launchagent=type(spec.launchagent)(
+            label=spec.launchagent.label,
+            plist_path=spec.launchagent.plist_path,
+            program_arguments=TRAINING_CALENDAR_SSH_BRIDGE_PROGRAM_ARGUMENTS,
+            working_directory=spec.launchagent.working_directory,
+            stdout_path=spec.launchagent.stdout_path,
+            stderr_path=spec.launchagent.stderr_path,
+            weekdays=spec.launchagent.weekdays,
+            hour=spec.launchagent.hour,
+            minute=spec.launchagent.minute,
+            timezone=spec.launchagent.timezone,
+            first_expected_run_after=spec.launchagent.first_expected_run_after,
+        ),
+        state_path=str(tmp_path / "state.json"),
+    )
+    plist = plistlib.loads(Path(spec.launchagent.plist_path).read_bytes())
+    plist["ProgramArguments"] = TRAINING_CALENDAR_SSH_BRIDGE_PROGRAM_ARGUMENTS
+    Path(spec.launchagent.plist_path).write_bytes(plistlib.dumps(plist))
+
+    with patch(
+        "assistant_scheduler_health._localhost_ssh_status",
+        return_value={"status": "blocked", "failure_class": "localhost_ssh_unavailable"},
+    ):
+        payload = evaluate_scheduler_job(
+            spec,
+            now=datetime(2026, 5, 22, 12, 0, tzinfo=ZoneInfo("Europe/Prague")),
+            write_state=False,
+            write_audit=False,
+            launchctl_text="state = not running\nruns = 0\nlast exit code = (never exited)\n",
+        )
+
+    assert payload["status"] == "blocked"
+    assert payload["failure_class"] == "localhost_ssh_unavailable"

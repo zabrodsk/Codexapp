@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -79,6 +80,10 @@ SENSITIVE_KEY_PARTS = {
     "transcript",
 }
 MAX_SAFE_STRING_CHARS = 500
+SENSITIVE_STRING_RE = re.compile(
+    r"(webcal://|https?://[^\s]*(?:token|secret|password|credential|auth|cookie)[^\s]*|cookie|token|secret|password|credential|auth)",
+    re.IGNORECASE,
+)
 
 
 def utc_now_iso() -> str:
@@ -121,6 +126,8 @@ def redact_payload(value: Any, *, parent_key: str = "") -> Any:
         return [redact_payload(item, parent_key=parent_key) for item in value]
     if isinstance(value, tuple):
         return [redact_payload(item, parent_key=parent_key) for item in value]
+    if isinstance(value, str) and SENSITIVE_STRING_RE.search(value):
+        return _redacted_value(value)
     if isinstance(value, str) and len(value) > MAX_SAFE_STRING_CHARS:
         return {
             "truncated": True,

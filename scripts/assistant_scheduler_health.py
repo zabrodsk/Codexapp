@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -18,6 +19,21 @@ from assistant_scheduler_state import AssistantSchedulerState, utc_now_iso
 SCHEDULER_POLICY_VERSION = "rocky-scheduler-policy-v1"
 OPENCLAW_ROOT = Path("/Users/clawdbot/.openclaw")
 WORKSPACE_ROOT = OPENCLAW_ROOT / "workspace"
+TRAINING_CALENDAR_SSH_BRIDGE_PROGRAM_ARGUMENTS = [
+    "/usr/bin/ssh",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "StrictHostKeyChecking=accept-new",
+    "localhost",
+    "cd /Users/clawdbot/.openclaw/workspace && /Users/clawdbot/.openclaw/workspace/.venv/bin/python scripts/training_calendar_scheduler.py --live --json",
+]
+TRAINING_CALENDAR_DIRECT_PROGRAM_ARGUMENTS = [
+    "/Users/clawdbot/.openclaw/workspace/.venv/bin/python",
+    "/Users/clawdbot/.openclaw/workspace/scripts/training_calendar_scheduler.py",
+    "--live",
+    "--json",
+]
 
 
 @dataclass(frozen=True)
@@ -32,6 +48,28 @@ class SchedulerJobSpec:
     state_path: str | None = None
     first_expected_run_after: str | None = None
     missing_log_grace_minutes: int = 120
+
+
+def training_calendar_launchagent_spec(*, execution_mode: str = "localhost_ssh_bridge") -> LaunchAgentSpec:
+    if execution_mode == "localhost_ssh_bridge":
+        program_arguments = TRAINING_CALENDAR_SSH_BRIDGE_PROGRAM_ARGUMENTS
+    elif execution_mode == "direct_launchd_python":
+        program_arguments = TRAINING_CALENDAR_DIRECT_PROGRAM_ARGUMENTS
+    else:
+        raise ValueError(f"Unsupported training calendar execution mode: {execution_mode}")
+    return LaunchAgentSpec(
+        label="com.openclaw.rocky-training-calendar-booking",
+        plist_path="/Users/clawdbot/Library/LaunchAgents/com.openclaw.rocky-training-calendar-booking.plist",
+        program_arguments=program_arguments,
+        working_directory="/Users/clawdbot/.openclaw/workspace",
+        stdout_path="/Users/clawdbot/.openclaw/logs/rocky-training-calendar-booking.log",
+        stderr_path="/Users/clawdbot/.openclaw/logs/rocky-training-calendar-booking.err.log",
+        weekdays=[1, 2, 3, 4, 5],
+        hour=6,
+        minute=30,
+        timezone="Europe/Prague",
+        first_expected_run_after="2026-05-25T06:30:00+02:00",
+    )
 
 
 BETTY_MAIL_TRIAGE_SPEC = SchedulerJobSpec(
@@ -60,8 +98,18 @@ BETTY_MAIL_TRIAGE_SPEC = SchedulerJobSpec(
     first_expected_run_after="2026-05-25T09:00:00+02:00",
 )
 
+TRAINING_CALENDAR_BOOKING_SPEC = SchedulerJobSpec(
+    job_name="training_calendar_booking",
+    job_label="Rocky training calendar booking",
+    workflow="training_calendar_scheduler",
+    launchagent=training_calendar_launchagent_spec(execution_mode="localhost_ssh_bridge"),
+    state_path="/Users/clawdbot/.openclaw/state/training_calendar_scheduler.json",
+    first_expected_run_after="2026-05-25T06:30:00+02:00",
+)
+
 JOB_REGISTRY = {
     BETTY_MAIL_TRIAGE_SPEC.job_name: BETTY_MAIL_TRIAGE_SPEC,
+    TRAINING_CALENDAR_BOOKING_SPEC.job_name: TRAINING_CALENDAR_BOOKING_SPEC,
 }
 
 
@@ -91,6 +139,53 @@ def _hash_file_tail(path: Path, *, max_chars: int = 2000) -> str | None:
     data = path.read_text(encoding="utf-8", errors="replace")
     tail = data[-max_chars:]
     return hashlib.sha256(tail.encode("utf-8")).hexdigest()[:16]
+
+
+def launchagent_execution_mode(program_arguments: list[str]) -> str:
+    joined = " ".join(program_arguments)
+    if (
+        program_arguments[:1] == ["/usr/bin/ssh"]
+        and "localhost" in program_arguments
+        and "training_calendar_scheduler.py --live --json" in joined
+    ):
+        return "localhost_ssh_bridge"
+    if (
+        program_arguments
+        and program_arguments[0].endswith("/python")
+        and any(arg.endswith("training_calendar_scheduler.py") for arg in program_arguments)
+        and "--live" in program_arguments
+        and "--json" in program_arguments
+    ):
+        return "direct_launchd_python"
+    return "custom"
+
+
+def _hash_text(value: str) -> str | None:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16] if value else None
+
+
+def _localhost_ssh_status() -> dict[str, Any]:
+    try:
+        proc = subprocess.run(
+            ["/usr/bin/ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "localhost", "true"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+    except Exception as exc:  # pragma: no cover - exact host failures vary.
+        return {
+            "status": "blocked",
+            "failure_class": "localhost_ssh_unavailable",
+            "returncode": None,
+            "stderr_hash": _hash_text(str(exc)),
+        }
+    return {
+        "status": "ok" if proc.returncode == 0 else "blocked",
+        "failure_class": None if proc.returncode == 0 else "localhost_ssh_unavailable",
+        "returncode": proc.returncode,
+        "stderr_hash": _hash_text(proc.stderr or ""),
+    }
 
 
 def _old_cron_status(spec: SchedulerJobSpec) -> dict[str, Any]:
@@ -175,7 +270,7 @@ def _log_status(spec: SchedulerJobSpec, *, now: datetime) -> dict[str, Any]:
     return result
 
 
-def _betty_proxy_state(spec: SchedulerJobSpec) -> dict[str, Any]:
+def _helper_state(spec: SchedulerJobSpec) -> dict[str, Any]:
     if not spec.state_path:
         return {"status": "not_configured"}
     path = Path(spec.state_path)
@@ -190,11 +285,22 @@ def _betty_proxy_state(spec: SchedulerJobSpec) -> dict[str, Any]:
             "state_path": str(path),
             "summary": str(exc),
         }
-    safe_state = {
-        "last_success_date": state.get("last_success_date"),
-        "last_success_at": state.get("last_success_at"),
-        "memory_path": state.get("memory_path"),
-    }
+    safe_keys = [
+        "last_success_date",
+        "last_success_at",
+        "memory_path",
+        "last_run_at",
+        "last_status",
+        "target_date",
+        "idempotency_key",
+        "run_idempotency_key",
+        "reason",
+        "created_count",
+        "skipped_count",
+        "blocked_count",
+        "error_hash",
+    ]
+    safe_state = {key: state.get(key) for key in safe_keys if key in state}
     return {"status": "ok", "state_path": str(path), "state": safe_state}
 
 
@@ -231,6 +337,12 @@ def evaluate_scheduler_job(
         read_launchctl=read_launchctl,
     )
     signals["launchagent"] = inspection.to_dict()
+    actual_arguments = list(signals["launchagent"].get("plist", {}).get("ProgramArguments") or spec.launchagent.program_arguments)
+    execution_mode = launchagent_execution_mode(actual_arguments)
+    signals["execution_mode"] = {
+        "mode": execution_mode,
+        "status": "ok" if execution_mode != "custom" else "degraded",
+    }
     if inspection.status == "blocked":
         issues.append(
             {
@@ -239,6 +351,27 @@ def evaluate_scheduler_job(
                 "summary": ", ".join(inspection.issues) or "LaunchAgent is blocked.",
             }
         )
+
+    if spec.job_name == "training_calendar_booking":
+        if execution_mode == "localhost_ssh_bridge":
+            bridge = _localhost_ssh_status()
+            signals["localhost_ssh_bridge"] = bridge
+            if bridge.get("status") != "ok":
+                issues.append(
+                    {
+                        "status": "blocked",
+                        "failure_class": bridge.get("failure_class") or "localhost_ssh_unavailable",
+                        "summary": "Training calendar LaunchAgent uses the localhost SSH bridge, but localhost SSH is unavailable.",
+                    }
+                )
+        elif execution_mode == "custom":
+            issues.append(
+                {
+                    "status": "degraded",
+                    "failure_class": "launchagent_execution_mode_unknown",
+                    "summary": "Training calendar LaunchAgent execution mode is not recognized as direct Python or localhost SSH bridge.",
+                }
+            )
     elif inspection.status == "degraded":
         issues.append(
             {
@@ -278,7 +411,7 @@ def evaluate_scheduler_job(
             }
         )
 
-    proxy_state = _betty_proxy_state(spec)
+    proxy_state = _helper_state(spec)
     signals["helper_state"] = proxy_state
     if proxy_state.get("status") == "degraded":
         issues.append(
@@ -288,6 +421,16 @@ def evaluate_scheduler_job(
                 "summary": proxy_state.get("summary") or "Helper state is degraded.",
             }
         )
+    if spec.job_name == "training_calendar_booking":
+        helper_payload = proxy_state.get("state") or {}
+        if helper_payload.get("error_hash"):
+            issues.append(
+                {
+                    "status": "degraded",
+                    "failure_class": "training_calendar_scheduler_error_hash_present",
+                    "summary": "Training calendar scheduler state has an error hash; inspect the safe state and recent dead letters.",
+                }
+            )
 
     overall_status = _max_status([issue["status"] for issue in issues])
     failure_class = next(
@@ -308,6 +451,7 @@ def evaluate_scheduler_job(
         "job_name": spec.job_name,
         "job_label": spec.job_label,
         "workflow": spec.workflow,
+        "execution_mode": execution_mode,
         "status": overall_status,
         "failure_class": failure_class,
         "summary": summary,

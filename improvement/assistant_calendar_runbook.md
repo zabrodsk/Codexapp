@@ -23,6 +23,36 @@ cd /Users/clawdbot/.openclaw/workspace
 This checks Apple Calendar DB readability, Swift availability, EventKit authorization, and AppleScript Calendar access.
 It does not create, update, or delete events.
 
+## Calendar TCC Probe
+
+Use this when a LaunchAgent can run Rocky but direct Calendar access differs from the SSH shell:
+
+```bash
+cd /Users/clawdbot/.openclaw/workspace
+/Users/clawdbot/.openclaw/workspace/.venv/bin/python scripts/rocky_runtime_tools.py \
+  calendar-tcc-probe --json
+```
+
+This is read-only. It reports the current execution context (`ssh`, `launchd`, or `interactive`), Calendar DB access, EventKit authorization, and AppleScript Calendar access.
+
+Sprint 4.3.1 verified that direct launchd venv Python for `com.openclaw.rocky-calendar-tcc-probe` is blocked by macOS TCC:
+
+- Calendar DB: `authorization denied`
+- EventKit: `not_determined`
+- AppleScript Calendar: timed out
+
+Because the SSH context has verified Calendar access, the production training scheduler intentionally uses a localhost SSH bridge until macOS permissions can be granted cleanly to the direct launchd executable.
+
+```bash
+cd /Users/clawdbot/.openclaw/workspace
+/Users/clawdbot/.openclaw/workspace/.venv/bin/python scripts/rocky_runtime_tools.py \
+  assistant-scheduler-health \
+  --job training_calendar_booking \
+  --json
+```
+
+The health output should report `execution_mode: localhost_ssh_bridge`, a clean stderr log, clean scheduler state, and available localhost SSH.
+
 ## Status Check
 
 ```bash
