@@ -96,6 +96,12 @@ from assistant_notification_dispatcher import dispatch_failure_notification
 from assistant_run_lock import smoke_lock_cycle
 from assistant_scheduler_health import evaluate_all_scheduler_jobs, format_scheduler_health_report
 from assistant_scheduler_state import AssistantSchedulerState
+from coding_focus_live_booking import book_coding_focus_proposal
+from coding_focus_proposal_engine import build_coding_focus_proposals
+from coding_session_inspector import inspect_coding_signals
+from coding_signal_sync import run_sync as run_coding_signal_sync
+from coding_work_briefing_builder import build_coding_work_briefing
+from coding_work_scheduler import run_coding_work_scheduler
 from email_triage_live_booking import book_email_triage_proposal
 from email_triage_proposal_engine import build_email_triage_proposals
 from email_triage_scheduler import run_email_triage_scheduler
@@ -146,6 +152,13 @@ RUNTIME_DEPLOYABLE_FILES = (
     "scripts/assistant_scheduler_health.py",
     "scripts/assistant_scheduler_health_launcher.py",
     "scripts/assistant_scheduler_state.py",
+    "scripts/coding_signal_sync.py",
+    "scripts/coding_session_inspector.py",
+    "scripts/coding_repo_inspector.py",
+    "scripts/coding_work_briefing_builder.py",
+    "scripts/coding_focus_proposal_engine.py",
+    "scripts/coding_focus_live_booking.py",
+    "scripts/coding_work_scheduler.py",
     "scripts/email_triage_live_booking.py",
     "scripts/email_triage_proposal_engine.py",
     "scripts/email_triage_reader.py",
@@ -168,6 +181,9 @@ RUNTIME_DEPLOYABLE_FILES = (
     "skills/task-focus-calendar/SKILL.md",
     "skills/task-lifecycle-engine/SKILL.md",
     "skills/task-reminder-engine/SKILL.md",
+    "skills/coding-session-inspector/SKILL.md",
+    "skills/coding-work-briefing/SKILL.md",
+    "skills/coding-focus-calendar/SKILL.md",
     "scripts/training_calendar_live_booking.py",
     "scripts/training_calendar_proposal_engine.py",
     "scripts/training_calendar_reconciler.py",
@@ -918,6 +934,88 @@ def build_parser() -> argparse.ArgumentParser:
         help="Do not append assistant audit events.",
     )
     task_scheduler.add_argument("--json", action="store_true", dest="json_output")
+
+    coding_sync = sub.add_parser(
+        "coding-signal-sync",
+        help="Build and optionally push sanitized laptop coding signals for Rocky.",
+    )
+    coding_sync.add_argument("--output-path", dest="output_path")
+    coding_sync.add_argument("--remote-host", default="clawdbot-mini", dest="remote_host")
+    coding_sync.add_argument("--remote-path", default="/Users/clawdbot/.openclaw/inbox/coding-signals/dusan-laptop/latest.json", dest="remote_path")
+    coding_sync.add_argument("--limit", type=int, default=30)
+    coding_sync.add_argument("--no-push", action="store_false", dest="push", default=True)
+    coding_sync.add_argument("--json", action="store_true", dest="json_output")
+
+    coding_inspect = sub.add_parser(
+        "coding-signal-inspect",
+        help="Inspect sanitized coding signals visible to Rocky.",
+    )
+    coding_inspect.add_argument("--laptop-manifest-path", dest="laptop_manifest_path")
+    coding_inspect.add_argument("--no-local-sessions", action="store_false", dest="include_local_sessions", default=True)
+    coding_inspect.add_argument("--no-repos", action="store_false", dest="include_repos", default=True)
+    coding_inspect.add_argument("--limit", type=int, default=30)
+    coding_inspect.add_argument("--json", action="store_true", dest="json_output")
+
+    coding_briefing = sub.add_parser(
+        "coding-work-briefing",
+        help="Build Rocky's noon coding work briefing from sanitized signals.",
+    )
+    coding_briefing.add_argument("--planning-date", dest="planning_date")
+    coding_briefing.add_argument("--laptop-manifest-path", dest="laptop_manifest_path")
+    coding_briefing.add_argument("--no-llm", action="store_true", dest="no_llm")
+    coding_briefing.add_argument("--json", action="store_true", dest="json_output")
+
+    coding_focus = sub.add_parser(
+        "coding-focus-proposals",
+        help="Build dry-run coding focus calendar proposals from Rocky's coding briefing.",
+    )
+    coding_focus.add_argument("--planning-date", dest="planning_date")
+    coding_focus.add_argument("--laptop-manifest-path", dest="laptop_manifest_path")
+    coding_focus.add_argument("--db-path", dest="db_path")
+    coding_focus.add_argument("--ledger-path", dest="ledger_path")
+    coding_focus.add_argument("--max-blocks", type=int, default=2, dest="max_blocks")
+    coding_focus.add_argument("--no-write-audit", action="store_false", dest="write_audit", default=True)
+    coding_focus.add_argument("--json", action="store_true", dest="json_output")
+
+    coding_book = sub.add_parser(
+        "coding-focus-book",
+        help="Supervised live booking for one selected Rocky coding focus proposal.",
+    )
+    coding_book.add_argument("--idempotency-key", required=True, dest="idempotency_key")
+    coding_book.add_argument("--planning-date", dest="planning_date")
+    coding_book.add_argument("--calendar", default="Calendar", dest="calendar_name")
+    coding_book.add_argument("--db-path", dest="db_path")
+    coding_book.add_argument("--state-db", dest="state_db")
+    coding_book.add_argument("--scheduler-db", dest="scheduler_db")
+    coding_book.add_argument("--ledger-path", dest="ledger_path")
+    coding_book.add_argument("--live", action="store_true")
+    coding_book.add_argument("--json", action="store_true", dest="json_output")
+
+    coding_scheduler = sub.add_parser(
+        "coding-work-scheduler-run",
+        help="Run Rocky's noon coding briefing and automatic focus booking scheduler.",
+    )
+    coding_scheduler.add_argument("--planning-date", dest="planning_date")
+    coding_scheduler.add_argument("--live", action="store_true")
+    coding_scheduler.add_argument("--notify", action="store_true")
+    coding_scheduler.add_argument("--notification-dry-run", action="store_true", dest="notification_dry_run")
+    coding_scheduler.add_argument("--notification-channel-id", dest="notification_channel_id")
+    coding_scheduler.add_argument("--laptop-manifest-path", dest="laptop_manifest_path")
+    coding_scheduler.add_argument("--max-blocks", type=int, default=2, dest="max_blocks")
+    coding_scheduler.add_argument("--db-path", dest="db_path")
+    coding_scheduler.add_argument("--calendar-state-db", dest="calendar_state_db")
+    coding_scheduler.add_argument("--scheduler-db", dest="scheduler_db")
+    coding_scheduler.add_argument("--ledger-path", dest="ledger_path")
+    coding_scheduler.add_argument("--state-file", default="/Users/clawdbot/.openclaw/state/coding_work_briefing_scheduler.json", dest="state_file")
+    coding_scheduler.add_argument("--lock-ttl-seconds", type=int, default=1800, dest="lock_ttl_seconds")
+    coding_scheduler.add_argument("--no-write-audit", action="store_false", dest="write_audit", default=True)
+    coding_scheduler.add_argument("--json", action="store_true", dest="json_output")
+
+    coding_llm = sub.add_parser(
+        "coding-work-llm-health",
+        help="Check Rocky's Codex LLM path used for coding work ranking.",
+    )
+    coding_llm.add_argument("--json", action="store_true", dest="json_output")
 
     notification_dispatch = sub.add_parser(
         "assistant-notification-dispatch",
@@ -2830,6 +2928,123 @@ def cmd_task_focus_book(args) -> int:
     return 2 if payload.get("reason") == "live_flag_required" else 1
 
 
+def cmd_coding_signal_sync(args) -> int:
+    payload = run_coding_signal_sync(
+        output_path=args.output_path,
+        remote_host=args.remote_host,
+        remote_path=args.remote_path,
+        push=args.push,
+        limit=args.limit,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Coding signal sync: {payload.get('status')} ({(payload.get('remote_sync') or {}).get('status')})")
+    return 0 if payload.get("status") == "ok" else 1
+
+
+def cmd_coding_signal_inspect(args) -> int:
+    payload = inspect_coding_signals(
+        laptop_manifest_path=args.laptop_manifest_path,
+        include_local_sessions=args.include_local_sessions,
+        include_repos=args.include_repos,
+        limit=args.limit,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Coding signals: {payload.get('status')} count={payload.get('signal_count')}")
+    return 0 if payload.get("status") in {"ok", "empty"} else 1
+
+
+def cmd_coding_work_briefing(args) -> int:
+    payload = build_coding_work_briefing(
+        planning_date=args.planning_date,
+        laptop_manifest_path=args.laptop_manifest_path,
+        use_llm=not args.no_llm,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(payload.get("briefing") or f"Coding briefing: {payload.get('status')}")
+    return 0 if payload.get("status") in {"ok", "empty"} else 1
+
+
+def cmd_coding_focus_proposals(args) -> int:
+    briefing = build_coding_work_briefing(
+        planning_date=args.planning_date,
+        laptop_manifest_path=args.laptop_manifest_path,
+    )
+    payload = build_coding_focus_proposals(
+        planning_date=args.planning_date,
+        briefing_payload=briefing,
+        db_path=args.db_path,
+        ledger_path=args.ledger_path,
+        write_audit=args.write_audit,
+        max_blocks=args.max_blocks,
+    )
+    payload["briefing"] = {"status": briefing.get("status"), "work_item_count": briefing.get("work_item_count"), "selected_count": briefing.get("selected_count")}
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Coding focus proposals: {payload.get('status')} ({payload.get('reason')})")
+    return 0 if payload.get("status") in {"proposal", "skipped_no_coding_focus", "skipped_weekend_target"} else 1
+
+
+def cmd_coding_focus_book(args) -> int:
+    payload = book_coding_focus_proposal(
+        idempotency_key=args.idempotency_key,
+        planning_date=args.planning_date,
+        calendar_name=args.calendar_name,
+        live=args.live,
+        db_path=args.db_path,
+        state_db_path=args.state_db,
+        scheduler_db_path=args.scheduler_db,
+        ledger_path=args.ledger_path,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Coding focus booking: {payload.get('status')} ({payload.get('reason')})")
+    if payload.get("status") in {"created", "skipped_duplicate"}:
+        return 0
+    return 2 if payload.get("reason") == "live_flag_required" else 1
+
+
+def cmd_coding_work_scheduler_run(args) -> int:
+    payload = run_coding_work_scheduler(
+        planning_date=args.planning_date,
+        live=args.live,
+        notify=args.notify,
+        notification_dry_run=args.notification_dry_run,
+        notification_channel_id=args.notification_channel_id,
+        laptop_manifest_path=args.laptop_manifest_path,
+        max_blocks=args.max_blocks,
+        db_path=args.db_path,
+        calendar_state_db_path=args.calendar_state_db,
+        scheduler_db_path=args.scheduler_db,
+        ledger_path=args.ledger_path,
+        state_file=args.state_file,
+        lock_ttl_seconds=args.lock_ttl_seconds,
+        write_audit=args.write_audit,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Coding work scheduler: {payload.get('status')} ({payload.get('reason')})")
+    return 0 if payload.get("status") in {"ok", "skipped_weekend_target", "skipped_no_coding_focus", "skipped_duplicate_run"} else 1
+
+
+def cmd_coding_work_llm_health(args) -> int:
+    payload = task_llm_health()
+    payload = {**payload, "workflow": "coding_work_briefing", "calendar_write_attempted": False}
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Coding work LLM: {payload.get('status')} ({payload.get('reason')})")
+    return 0 if payload.get("status") == "healthy" else 1
+
+
 def cmd_task_command_apply(args) -> int:
     signal = build_manual_task_signal(args.text, source=args.source, source_ref=args.source_ref)
     detected = detect_task_candidates([signal], use_llm=False, max_candidates=1)
@@ -3145,6 +3360,13 @@ def main() -> int:
         "task-lifecycle-run": cmd_task_lifecycle_run,
         "task-focus-proposals": cmd_task_focus_proposals,
         "task-focus-book": cmd_task_focus_book,
+        "coding-signal-sync": cmd_coding_signal_sync,
+        "coding-signal-inspect": cmd_coding_signal_inspect,
+        "coding-work-briefing": cmd_coding_work_briefing,
+        "coding-focus-proposals": cmd_coding_focus_proposals,
+        "coding-focus-book": cmd_coding_focus_book,
+        "coding-work-scheduler-run": cmd_coding_work_scheduler_run,
+        "coding-work-llm-health": cmd_coding_work_llm_health,
         "task-command-apply": cmd_task_command_apply,
         "task-spine-scheduler-run": cmd_task_spine_scheduler_run,
         "assistant-notification-dispatch": cmd_assistant_notification_dispatch,

@@ -28,6 +28,13 @@ from rocky_runtime_tools import (
     cmd_notion_task_schema_ensure,
     cmd_task_detect,
     cmd_task_detector_llm_health,
+    cmd_coding_signal_sync,
+    cmd_coding_signal_inspect,
+    cmd_coding_work_briefing,
+    cmd_coding_focus_book,
+    cmd_coding_focus_proposals,
+    cmd_coding_work_scheduler_run,
+    cmd_coding_work_llm_health,
     cmd_task_focus_book,
     cmd_task_focus_proposals,
     cmd_task_lifecycle_run,
@@ -134,6 +141,13 @@ def test_parser_includes_assistant_commands():
     assert parser.parse_args(["task-lifecycle-run"]).command == "task-lifecycle-run"
     assert parser.parse_args(["task-focus-proposals"]).command == "task-focus-proposals"
     assert parser.parse_args(["task-focus-book", "--idempotency-key", "rocky:task:test"]).command == "task-focus-book"
+    assert parser.parse_args(["coding-signal-sync"]).command == "coding-signal-sync"
+    assert parser.parse_args(["coding-signal-inspect"]).command == "coding-signal-inspect"
+    assert parser.parse_args(["coding-work-briefing"]).command == "coding-work-briefing"
+    assert parser.parse_args(["coding-focus-proposals"]).command == "coding-focus-proposals"
+    assert parser.parse_args(["coding-focus-book", "--idempotency-key", "rocky:coding:test"]).command == "coding-focus-book"
+    assert parser.parse_args(["coding-work-scheduler-run"]).command == "coding-work-scheduler-run"
+    assert parser.parse_args(["coding-work-llm-health"]).command == "coding-work-llm-health"
     assert parser.parse_args(["task-command-apply", "--text", "remember this"]).command == "task-command-apply"
     assert parser.parse_args(["task-spine-scheduler-run"]).command == "task-spine-scheduler-run"
     assert parser.parse_args(
@@ -149,6 +163,36 @@ def test_task_detector_llm_health_json_uses_safe_helper(capsys):
     assert result == 0
     assert payload["status"] == "healthy"
     assert payload["model"] == "gpt-5.5"
+
+
+def test_coding_work_llm_health_json_uses_safe_helper(capsys):
+    with patch("rocky_runtime_tools.task_llm_health", return_value={"status": "healthy", "reason": "task_llm_ok", "model": "gpt-5.5"}):
+        result = cmd_coding_work_llm_health(_args(json_output=True))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert payload["status"] == "healthy"
+    assert payload["workflow"] == "coding_work_briefing"
+
+
+def test_coding_runtime_commands_are_wired(capsys, tmp_path):
+    with patch("rocky_runtime_tools.run_coding_signal_sync", return_value={"status": "ok", "remote_sync": {"status": "skipped"}}):
+        assert cmd_coding_signal_sync(_args(output_path=None, remote_host="host", remote_path="/tmp/latest.json", push=False, limit=1, json_output=True)) == 0
+    capsys.readouterr()
+    with patch("rocky_runtime_tools.inspect_coding_signals", return_value={"status": "ok", "signal_count": 1, "signals": []}):
+        assert cmd_coding_signal_inspect(_args(laptop_manifest_path=None, include_local_sessions=True, include_repos=True, limit=1, json_output=True)) == 0
+    capsys.readouterr()
+    with patch("rocky_runtime_tools.build_coding_work_briefing", return_value={"status": "ok", "briefing": "brief", "work_item_count": 1, "selected_count": 1}):
+        assert cmd_coding_work_briefing(_args(planning_date="2026-05-25", laptop_manifest_path=None, no_llm=True, json_output=True)) == 0
+    capsys.readouterr()
+    with patch("rocky_runtime_tools.build_coding_work_briefing", return_value={"status": "ok", "work_item_count": 1, "selected_count": 0, "selected_focus_items": []}), patch("rocky_runtime_tools.build_coding_focus_proposals", return_value={"status": "skipped_no_coding_focus", "reason": "none", "proposals": []}):
+        assert cmd_coding_focus_proposals(_args(planning_date="2026-05-25", laptop_manifest_path=None, db_path=None, ledger_path=str(tmp_path / "audit.jsonl"), max_blocks=2, write_audit=False, json_output=True)) == 0
+    capsys.readouterr()
+    with patch("rocky_runtime_tools.book_coding_focus_proposal", return_value={"status": "blocked", "reason": "live_flag_required"}):
+        assert cmd_coding_focus_book(_args(idempotency_key="rocky:coding:test", planning_date="2026-05-25", calendar_name="Calendar", db_path=None, state_db=None, scheduler_db=None, ledger_path=None, live=False, json_output=True)) == 2
+    capsys.readouterr()
+    with patch("rocky_runtime_tools.run_coding_work_scheduler", return_value={"status": "skipped_weekend_target", "reason": "weekend"}):
+        assert cmd_coding_work_scheduler_run(_args(planning_date="2026-05-23", live=True, notify=True, notification_dry_run=True, notification_channel_id=None, laptop_manifest_path=None, max_blocks=2, db_path=None, calendar_state_db=None, scheduler_db=None, ledger_path=None, state_file=str(tmp_path / "state.json"), lock_ttl_seconds=60, write_audit=False, json_output=True)) == 0
 
 
 def test_calendar_policy_check_json_outputs_audit_id(tmp_path, capsys):
@@ -717,6 +761,16 @@ def test_runtime_deployable_files_include_training_calendar_modules():
     assert "scripts/task_focus_proposal_engine.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/task_focus_live_booking.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/task_spine_scheduler.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/coding_signal_sync.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/coding_session_inspector.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/coding_repo_inspector.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/coding_work_briefing_builder.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/coding_focus_proposal_engine.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/coding_focus_live_booking.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/coding_work_scheduler.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "skills/coding-session-inspector/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
+    assert "skills/coding-work-briefing/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
+    assert "skills/coding-focus-calendar/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
 
 
 def test_training_calendar_reconcile_cli_uses_reconcile_path(tmp_path, capsys):

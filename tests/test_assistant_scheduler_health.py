@@ -18,6 +18,9 @@ from assistant_scheduler_health import (
     EMAIL_TRIAGE_DIRECT_PROGRAM_ARGUMENTS,
     EMAIL_TRIAGE_SSH_BRIDGE_PROGRAM_ARGUMENTS,
     JOB_REGISTRY,
+    CODING_WORK_BRIEFING_SPEC,
+    CODING_WORK_DIRECT_PROGRAM_ARGUMENTS,
+    CODING_WORK_SSH_BRIDGE_PROGRAM_ARGUMENTS,
     TASK_SPINE_DIRECT_PROGRAM_ARGUMENTS,
     TASK_SPINE_SPEC,
     TASK_SPINE_SSH_BRIDGE_PROGRAM_ARGUMENTS,
@@ -179,6 +182,22 @@ def test_training_calendar_booking_launchagent_spec_matches_production_schedule(
     assert spec.launchagent.hour == 6
     assert spec.launchagent.minute == 30
     assert spec.state_path == "/Users/clawdbot/.openclaw/state/training_calendar_scheduler.json"
+
+
+def test_coding_work_briefing_launchagent_spec_matches_production_schedule():
+    spec = CODING_WORK_BRIEFING_SPEC
+
+    assert JOB_REGISTRY["coding_work_briefing"] is spec
+    assert spec.workflow == "coding_work_scheduler"
+    assert spec.launchagent.label == "com.openclaw.rocky-coding-work-briefing"
+    assert spec.launchagent.program_arguments == CODING_WORK_SSH_BRIDGE_PROGRAM_ARGUMENTS
+    assert "coding_work_scheduler.py --live --notify --json" in " ".join(spec.launchagent.program_arguments)
+    assert launchagent_execution_mode(spec.launchagent.program_arguments) == "localhost_ssh_bridge"
+    assert launchagent_execution_mode(CODING_WORK_DIRECT_PROGRAM_ARGUMENTS) == "direct_launchd_python"
+    assert spec.launchagent.weekdays == [1, 2, 3, 4]
+    assert spec.launchagent.hour == 12
+    assert spec.launchagent.minute == 5
+    assert spec.state_path == "/Users/clawdbot/.openclaw/state/coding_work_briefing_scheduler.json"
 
 
 def test_training_calendar_health_reports_ssh_bridge_mode(tmp_path):

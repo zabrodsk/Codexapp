@@ -69,6 +69,22 @@ TASK_SPINE_DIRECT_PROGRAM_ARGUMENTS = [
     "--notify",
     "--json",
 ]
+CODING_WORK_SSH_BRIDGE_PROGRAM_ARGUMENTS = [
+    "/usr/bin/ssh",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "StrictHostKeyChecking=accept-new",
+    "localhost",
+    "cd /Users/clawdbot/.openclaw/workspace && /Users/clawdbot/.openclaw/workspace/.venv/bin/python scripts/coding_work_scheduler.py --live --notify --json",
+]
+CODING_WORK_DIRECT_PROGRAM_ARGUMENTS = [
+    "/Users/clawdbot/.openclaw/workspace/.venv/bin/python",
+    "/Users/clawdbot/.openclaw/workspace/scripts/coding_work_scheduler.py",
+    "--live",
+    "--notify",
+    "--json",
+]
 
 
 @dataclass(frozen=True)
@@ -184,11 +200,33 @@ TASK_SPINE_SPEC = SchedulerJobSpec(
     first_expected_run_after="2026-05-25T10:15:00+02:00",
 )
 
+CODING_WORK_BRIEFING_SPEC = SchedulerJobSpec(
+    job_name="coding_work_briefing",
+    job_label="Rocky coding work briefing",
+    workflow="coding_work_scheduler",
+    launchagent=LaunchAgentSpec(
+        label="com.openclaw.rocky-coding-work-briefing",
+        plist_path="/Users/clawdbot/Library/LaunchAgents/com.openclaw.rocky-coding-work-briefing.plist",
+        program_arguments=CODING_WORK_SSH_BRIDGE_PROGRAM_ARGUMENTS,
+        working_directory="/Users/clawdbot/.openclaw/workspace",
+        stdout_path="/Users/clawdbot/.openclaw/logs/rocky-coding-work-briefing.log",
+        stderr_path="/Users/clawdbot/.openclaw/logs/rocky-coding-work-briefing.err.log",
+        weekdays=[1, 2, 3, 4],
+        hour=12,
+        minute=5,
+        timezone="Europe/Prague",
+        first_expected_run_after="2026-05-25T12:05:00+02:00",
+    ),
+    state_path="/Users/clawdbot/.openclaw/state/coding_work_briefing_scheduler.json",
+    first_expected_run_after="2026-05-25T12:05:00+02:00",
+)
+
 JOB_REGISTRY = {
     BETTY_MAIL_TRIAGE_SPEC.job_name: BETTY_MAIL_TRIAGE_SPEC,
     TRAINING_CALENDAR_BOOKING_SPEC.job_name: TRAINING_CALENDAR_BOOKING_SPEC,
     EMAIL_TRIAGE_BOOKING_SPEC.job_name: EMAIL_TRIAGE_BOOKING_SPEC,
     TASK_SPINE_SPEC.job_name: TASK_SPINE_SPEC,
+    CODING_WORK_BRIEFING_SPEC.job_name: CODING_WORK_BRIEFING_SPEC,
 }
 
 
@@ -269,9 +307,26 @@ def launchagent_execution_mode(program_arguments: list[str]) -> str:
     ):
         return "localhost_ssh_bridge"
     if (
+        program_arguments[:1] == ["/usr/bin/ssh"]
+        and "localhost" in program_arguments
+        and "coding_work_scheduler.py --live" in joined
+        and "--notify" in joined
+        and "--json" in joined
+    ):
+        return "localhost_ssh_bridge"
+    if (
         program_arguments
         and program_arguments[0].endswith("/python")
         and any(arg.endswith("task_spine_scheduler.py") for arg in program_arguments)
+        and "--live" in program_arguments
+        and "--notify" in program_arguments
+        and "--json" in program_arguments
+    ):
+        return "direct_launchd_python"
+    if (
+        program_arguments
+        and program_arguments[0].endswith("/python")
+        and any(arg.endswith("coding_work_scheduler.py") for arg in program_arguments)
         and "--live" in program_arguments
         and "--notify" in program_arguments
         and "--json" in program_arguments
@@ -418,6 +473,7 @@ def _helper_state(spec: SchedulerJobSpec) -> dict[str, Any]:
         "created_count",
         "skipped_count",
         "blocked_count",
+        "work_item_count",
         "error_hash",
         "llm",
     ]
@@ -484,7 +540,7 @@ def evaluate_scheduler_job(
                     "summary": f"{spec.job_label} LaunchAgent uses the localhost SSH bridge, but localhost SSH is unavailable.",
                 }
             )
-    if spec.job_name in {"training_calendar_booking", "email_triage_booking", "task_spine"}:
+    if spec.job_name in {"training_calendar_booking", "email_triage_booking", "task_spine", "coding_work_briefing"}:
         if execution_mode == "localhost_ssh_bridge":
             pass
         elif execution_mode == "custom":
@@ -544,7 +600,7 @@ def evaluate_scheduler_job(
                 "summary": proxy_state.get("summary") or "Helper state is degraded.",
             }
         )
-    if spec.job_name in {"training_calendar_booking", "email_triage_booking", "task_spine"}:
+    if spec.job_name in {"training_calendar_booking", "email_triage_booking", "task_spine", "coding_work_briefing"}:
         helper_payload = proxy_state.get("state") or {}
         if helper_payload.get("error_hash"):
             issues.append(

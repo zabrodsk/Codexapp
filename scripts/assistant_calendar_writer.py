@@ -520,6 +520,7 @@ def create_calendar_block(
             audit_id=requested.audit_id,
             idempotency_key=idempotency_key,
             created_at=requested.created_at,
+            metadata_extra=metadata_extra,
         )
         result = _run_osascript_with_calendar_retry(
             CREATE_EVENT_SCRIPT,
