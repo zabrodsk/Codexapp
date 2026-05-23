@@ -27,6 +27,7 @@ from rocky_runtime_tools import (
     cmd_notion_task_health,
     cmd_notion_task_schema_ensure,
     cmd_task_detect,
+    cmd_task_detector_llm_health,
     cmd_task_focus_book,
     cmd_task_focus_proposals,
     cmd_task_reminders_run,
@@ -127,6 +128,7 @@ def test_parser_includes_assistant_commands():
     assert parser.parse_args(["notion-task-health"]).command == "notion-task-health"
     assert parser.parse_args(["notion-task-schema-ensure"]).command == "notion-task-schema-ensure"
     assert parser.parse_args(["task-detect"]).command == "task-detect"
+    assert parser.parse_args(["task-detector-llm-health"]).command == "task-detector-llm-health"
     assert parser.parse_args(["task-reminders-run"]).command == "task-reminders-run"
     assert parser.parse_args(["task-focus-proposals"]).command == "task-focus-proposals"
     assert parser.parse_args(["task-focus-book", "--idempotency-key", "rocky:task:test"]).command == "task-focus-book"
@@ -135,6 +137,16 @@ def test_parser_includes_assistant_commands():
     assert parser.parse_args(
         ["assistant-notification-dispatch", "--status", "blocked", "--reason", "test", "--dry-run"]
     ).command == "assistant-notification-dispatch"
+
+
+def test_task_detector_llm_health_json_uses_safe_helper(capsys):
+    with patch("rocky_runtime_tools.task_llm_health", return_value={"status": "healthy", "reason": "task_llm_ok", "model": "gpt-5.5"}):
+        result = cmd_task_detector_llm_health(_args(json_output=True))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert payload["status"] == "healthy"
+    assert payload["model"] == "gpt-5.5"
 
 
 def test_calendar_policy_check_json_outputs_audit_id(tmp_path, capsys):

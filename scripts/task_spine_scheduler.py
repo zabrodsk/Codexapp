@@ -242,6 +242,7 @@ def _run_inner(
             "schema": _safe_schema(schema),
             "signal_count": signals.get("signal_count", 0),
             "candidate_count": detected.get("candidate_count", 0),
+            "llm": _safe_llm_summary(detected),
             "deduped_count": deduped.get("candidate_count", 0),
             "notion_upsert_count": len(upserts),
             "auto_created_count": len(created_tasks),
@@ -317,6 +318,7 @@ def _finish_run(
                 "status": safe.get("status"),
                 "signal_count": safe.get("signal_count"),
                 "candidate_count": safe.get("candidate_count"),
+                "llm": safe.get("llm"),
                 "notion_upsert_count": safe.get("notion_upsert_count"),
                 "calendar_write_attempted": safe.get("calendar_write_attempted"),
                 "calendar_event_created": safe.get("calendar_event_created"),
@@ -374,6 +376,7 @@ def _write_state_file(path: Path, payload: dict[str, Any]) -> None:
         "reason": payload.get("reason"),
         "signal_count": payload.get("signal_count", 0),
         "candidate_count": payload.get("candidate_count", 0),
+        "llm": payload.get("llm") or {},
         "notion_upsert_count": payload.get("notion_upsert_count", 0),
         "calendar_write_attempted": payload.get("calendar_write_attempted", False),
         "calendar_event_created": payload.get("calendar_event_created", False),
@@ -402,6 +405,20 @@ def _redact_payload(value: Any) -> Any:
     if isinstance(value, str) and UNSAFE_TEXT_RE.search(value):
         return {"redacted": True, "sha256": _hash_text(value), "chars": len(value)}
     return value
+
+
+def _safe_llm_summary(detected: dict[str, Any]) -> dict[str, Any]:
+    provider = detected.get("llm_provider")
+    if provider == "openai_codex_oauth":
+        provider = "openai_codex"
+    return {
+        "status": detected.get("llm_status"),
+        "reason": detected.get("llm_reason"),
+        "provider": provider,
+        "model": detected.get("llm_model"),
+        "attempts": detected.get("llm_attempts") or [],
+        "error_hash": detected.get("llm_error_hash"),
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import subprocess
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -15,6 +14,7 @@ SCRIPTS = Path(__file__).resolve().parent
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
+from assistant_codex_llm import AssistantCodexLLMError, generate_codex_text, hash_text as safe_error_hash
 from notion_task_manager import stable_task_dedupe_key, stable_task_id
 
 
@@ -39,37 +39,67 @@ def detect_task_candidates(
     max_candidates: int = 20,
 ) -> dict[str, Any]:
     candidates: list[dict[str, Any]] = []
-    llm_error: str | None = None
+    llm_status = "disabled" if not use_llm else "not_attempted"
+    llm_reason: str | None = None
+    llm_error_hash: str | None = None
+    llm_provider: str | None = None
+    llm_model: str | None = None
+    llm_attempts: list[dict[str, Any]] = []
     if use_llm and signals:
         try:
-            llm_candidates = _detect_with_llm(signals, llm_func=llm_func)
+            llm_payload = _detect_with_llm(signals, llm_func=llm_func)
+            llm_candidates = llm_payload["candidates"]
             candidates.extend(llm_candidates)
+            llm_status = "ok"
+            llm_reason = "task_llm_ok"
+            llm_provider = llm_payload.get("llm_provider")
+            llm_model = llm_payload.get("llm_model")
+            llm_attempts = llm_payload.get("llm_attempts") or []
         except Exception as exc:
-            llm_error = exc.__class__.__name__
+            llm_status = "degraded"
+            llm_reason = _llm_error_reason(exc)
+            llm_error_hash = _llm_error_hash(exc)
+            llm_attempts = getattr(exc, "attempts", []) or []
     if not candidates:
         candidates.extend(_detect_with_heuristics(signals))
     normalized = [_normalize_candidate(candidate) for candidate in candidates]
     return {
-        "status": "ok" if llm_error is None else "degraded",
-        "reason": None if llm_error is None else "llm_detector_fallback_used",
+        "status": "ok" if llm_status in {"ok", "disabled", "not_attempted"} else "degraded",
+        "reason": None if llm_status in {"ok", "disabled", "not_attempted"} else "llm_detector_fallback_used",
         "candidate_count": min(len(normalized), max(0, int(max_candidates))),
         "candidates": normalized[: max(0, int(max_candidates))],
-        "llm_error_class": llm_error,
+        "llm_status": llm_status,
+        "llm_reason": llm_reason,
+        "llm_provider": llm_provider,
+        "llm_model": llm_model,
+        "llm_attempts": _sanitize_llm_attempts(llm_attempts),
+        "llm_error_hash": llm_error_hash,
+        "llm_error_class": None if llm_status in {"ok", "disabled", "not_attempted"} else "AssistantCodexLLMError",
         "calendar_write_attempted": False,
         "notion_write_attempted": False,
     }
 
 
-def _detect_with_llm(signals: list[dict[str, Any]], *, llm_func: Any | None) -> list[dict[str, Any]]:
+def _detect_with_llm(signals: list[dict[str, Any]], *, llm_func: Any | None) -> dict[str, Any]:
     if llm_func is None:
-        llm_func = _student_llm_json
+        llm_func = _rocky_codex_llm_json
     prompt = _build_prompt(signals)
-    raw = llm_func(prompt)
+    raw_payload = llm_func(prompt)
+    if isinstance(raw_payload, dict):
+        raw = raw_payload.get("text", "")
+        llm_provider = raw_payload.get("provider")
+        llm_model = raw_payload.get("model")
+        llm_attempts = raw_payload.get("attempts") or []
+    else:
+        raw = str(raw_payload)
+        llm_provider = "test_stub"
+        llm_model = None
+        llm_attempts = []
     payload = json.loads(_extract_json(str(raw)))
     if isinstance(payload, dict):
         payload = payload.get("tasks") or payload.get("candidates") or []
     if not isinstance(payload, list):
-        return []
+        payload = []
     by_signal = {str(signal.get("signal_id")): signal for signal in signals}
     candidates: list[dict[str, Any]] = []
     for item in payload:
@@ -77,7 +107,12 @@ def _detect_with_llm(signals: list[dict[str, Any]], *, llm_func: Any | None) -> 
             continue
         signal = by_signal.get(str(item.get("signal_id") or "")) or (signals[0] if signals else {})
         candidates.append({**item, "source": signal.get("source"), "source_ref": signal.get("source_ref"), "evidence_hash": signal.get("evidence_hash")})
-    return candidates
+    return {
+        "candidates": candidates,
+        "llm_provider": llm_provider,
+        "llm_model": llm_model,
+        "llm_attempts": llm_attempts,
+    }
 
 
 def _detect_with_heuristics(signals: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -187,59 +222,8 @@ def _build_prompt(signals: list[dict[str, Any]]) -> str:
     )
 
 
-def _student_llm_json(prompt: str) -> str:
-    student_root = Path("/Users/clawdbot/.openclaw/workspace-student")
-    if str(student_root) not in sys.path:
-        sys.path.insert(0, str(student_root))
-    try:
-        from student.config import load_config
-        from student.llm import _codex_model_candidates, _codex_text_input, _run_with_timeout
-
-        config = load_config()
-        model = str(getattr(config, "validation_ingestion_model", "") or getattr(config, "openai_codex_model", "") or "")
-        for candidate in _codex_model_candidates(config, model_override=model):
-            answer = _run_with_timeout(
-                _codex_text_input,
-                prompt,
-                config,
-                model_override=candidate,
-                reasoning_override="low",
-                timeout_seconds=20,
-            )
-            if answer:
-                return answer
-        raise RuntimeError("student_codex_llm_unavailable")
-    except Exception:
-        python = student_root / "venv/bin/python"
-        if not python.exists():
-            raise
-        script = """
-import sys
-sys.path.insert(0, ".")
-from student.config import load_config
-from student.llm import _codex_model_candidates, _codex_text_input, _run_with_timeout
-prompt = sys.stdin.read()
-config = load_config()
-model = str(getattr(config, "validation_ingestion_model", "") or getattr(config, "openai_codex_model", "") or "")
-for candidate in _codex_model_candidates(config, model_override=model):
-    answer = _run_with_timeout(_codex_text_input, prompt, config, model_override=candidate, reasoning_override="low", timeout_seconds=20)
-    if answer:
-        sys.stdout.write(answer)
-        raise SystemExit(0)
-raise RuntimeError("student_codex_llm_unavailable")
-"""
-        proc = subprocess.run(
-            [str(python), "-c", script],
-            cwd=str(student_root),
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=35,
-            check=False,
-        )
-        if proc.returncode != 0:
-            raise RuntimeError(f"student_llm_subprocess_failed:{_hash_text(proc.stderr or proc.stdout)}")
-        return proc.stdout
+def _rocky_codex_llm_json(prompt: str) -> dict[str, Any]:
+    return generate_codex_text(prompt, timeout_seconds=60)
 
 
 def _extract_json(text: str) -> str:
@@ -255,7 +239,38 @@ def _extract_json(text: str) -> str:
             return text[start : start + end]
         except json.JSONDecodeError:
             continue
-    raise ValueError("llm_json_not_found")
+    raise AssistantCodexLLMError("task_llm_json_invalid", "LLM output did not contain valid JSON.")
+
+
+def _llm_error_reason(exc: Exception) -> str:
+    if isinstance(exc, AssistantCodexLLMError):
+        return exc.reason
+    if isinstance(exc, json.JSONDecodeError):
+        return "task_llm_json_invalid"
+    if isinstance(exc, TimeoutError):
+        return "task_llm_timeout"
+    return "task_llm_model_failed"
+
+
+def _llm_error_hash(exc: Exception) -> str:
+    if isinstance(exc, AssistantCodexLLMError):
+        return exc.error_hash
+    return safe_error_hash(str(exc))
+
+
+def _sanitize_llm_attempts(attempts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    safe = []
+    for item in attempts or []:
+        safe.append(
+            {
+                "model": item.get("model"),
+                "status": item.get("status"),
+                "reason": item.get("reason"),
+                "error_hash": item.get("error_hash"),
+                "duration_ms": item.get("duration_ms"),
+            }
+        )
+    return safe
 
 
 def _title_from_summary(summary: str) -> str:

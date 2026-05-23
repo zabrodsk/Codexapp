@@ -419,6 +419,7 @@ def _helper_state(spec: SchedulerJobSpec) -> dict[str, Any]:
         "skipped_count",
         "blocked_count",
         "error_hash",
+        "llm",
     ]
     safe_state = {key: state.get(key) for key in safe_keys if key in state}
     return {"status": "ok", "state_path": str(path), "state": safe_state}
@@ -553,6 +554,23 @@ def evaluate_scheduler_job(
                     "summary": f"{spec.job_label} scheduler state has an error hash; inspect the safe state and recent dead letters.",
                 }
             )
+        if spec.job_name == "task_spine":
+            llm_payload = helper_payload.get("llm") or {}
+            signals["task_llm"] = {
+                "status": llm_payload.get("status") or "unknown",
+                "reason": llm_payload.get("reason"),
+                "provider": llm_payload.get("provider"),
+                "model": llm_payload.get("model"),
+                "error_hash": llm_payload.get("error_hash"),
+            }
+            if llm_payload.get("status") == "degraded":
+                issues.append(
+                    {
+                        "status": "degraded",
+                        "failure_class": "task_llm_degraded",
+                        "summary": f"{spec.job_label} task extraction LLM is degraded; Rocky is relying on deterministic fallback.",
+                    }
+                )
 
     overall_status = _max_status([issue["status"] for issue in issues])
     failure_class = next(

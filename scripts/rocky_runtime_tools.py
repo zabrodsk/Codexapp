@@ -91,6 +91,7 @@ from assistant_calendar_status import (
 )
 from assistant_calendar_tcc_probe import build_calendar_tcc_probe
 from assistant_calendar_writer import create_calendar_block, delete_calendar_block
+from assistant_codex_llm import task_llm_health
 from assistant_notification_dispatcher import dispatch_failure_notification
 from assistant_run_lock import smoke_lock_cycle
 from assistant_scheduler_health import evaluate_all_scheduler_jobs, format_scheduler_health_report
@@ -136,6 +137,7 @@ RUNTIME_DEPLOYABLE_FILES = (
     "scripts/assistant_calendar_status.py",
     "scripts/assistant_calendar_tcc_probe.py",
     "scripts/assistant_calendar_writer.py",
+    "scripts/assistant_codex_llm.py",
     "scripts/assistant_launchd.py",
     "scripts/assistant_notification_dispatcher.py",
     "scripts/assistant_run_lock.py",
@@ -803,6 +805,12 @@ def build_parser() -> argparse.ArgumentParser:
     task_detect.add_argument("--limit", type=int, default=30)
     task_detect.add_argument("--no-llm", action="store_true", dest="no_llm")
     task_detect.add_argument("--json", action="store_true", dest="json_output")
+
+    task_llm_health = sub.add_parser(
+        "task-detector-llm-health",
+        help="Check Rocky's task-detector Codex LLM path without writing Notion or Calendar.",
+    )
+    task_llm_health.add_argument("--json", action="store_true", dest="json_output")
 
     task_reminders = sub.add_parser(
         "task-reminders-run",
@@ -2719,6 +2727,15 @@ def cmd_task_detect(args) -> int:
     return 0 if payload["status"] in {"ok", "degraded"} else 1
 
 
+def cmd_task_detector_llm_health(args) -> int:
+    payload = task_llm_health()
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Task detector LLM: {payload.get('status')} ({payload.get('reason')})")
+    return 0 if payload.get("status") == "healthy" else 1
+
+
 def cmd_task_reminders_run(args) -> int:
     payload = run_task_reminders(
         today=args.today,
@@ -3081,6 +3098,7 @@ def main() -> int:
         "notion-task-schema-ensure": cmd_notion_task_schema_ensure,
         "notion-task-list": cmd_notion_task_list,
         "task-detect": cmd_task_detect,
+        "task-detector-llm-health": cmd_task_detector_llm_health,
         "task-reminders-run": cmd_task_reminders_run,
         "task-focus-proposals": cmd_task_focus_proposals,
         "task-focus-book": cmd_task_focus_book,

@@ -381,3 +381,59 @@ def test_task_spine_health_reports_ssh_bridge_mode(tmp_path):
 
     assert payload["status"] == "healthy"
     assert payload["execution_mode"] == "localhost_ssh_bridge"
+
+
+def test_task_spine_health_reports_degraded_llm_from_state(tmp_path):
+    base = _spec(tmp_path)
+    state_path = tmp_path / "state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "last_status": "degraded",
+                "reason": "task_spine_completed_with_degraded_signals",
+                "llm": {
+                    "status": "degraded",
+                    "reason": "task_llm_model_failed",
+                    "provider": "openai_codex_oauth",
+                    "model": None,
+                    "error_hash": "abc123",
+                },
+            }
+        )
+    )
+    spec = SchedulerJobSpec(
+        job_name="task_spine",
+        job_label="Rocky personal task spine",
+        workflow="task_spine_scheduler",
+        launchagent=type(base.launchagent)(
+            label=base.launchagent.label,
+            plist_path=base.launchagent.plist_path,
+            program_arguments=TASK_SPINE_SSH_BRIDGE_PROGRAM_ARGUMENTS,
+            working_directory=base.launchagent.working_directory,
+            stdout_path=base.launchagent.stdout_path,
+            stderr_path=base.launchagent.stderr_path,
+            weekdays=[1, 2, 3, 4],
+            hour=10,
+            minute=15,
+            timezone=base.launchagent.timezone,
+            first_expected_run_after=base.launchagent.first_expected_run_after,
+        ),
+        state_path=str(state_path),
+    )
+    plist = plistlib.loads(Path(spec.launchagent.plist_path).read_bytes())
+    plist["ProgramArguments"] = TASK_SPINE_SSH_BRIDGE_PROGRAM_ARGUMENTS
+    plist["StartCalendarInterval"] = [{"Weekday": day, "Hour": 10, "Minute": 15} for day in [1, 2, 3, 4]]
+    Path(spec.launchagent.plist_path).write_bytes(plistlib.dumps(plist))
+
+    with patch("assistant_scheduler_health._localhost_ssh_status", return_value={"status": "ok"}):
+        payload = evaluate_scheduler_job(
+            spec,
+            now=datetime(2026, 5, 22, 12, 0, tzinfo=ZoneInfo("Europe/Prague")),
+            write_state=False,
+            write_audit=False,
+            launchctl_text="state = not running\nruns = 0\nlast exit code = (never exited)\n",
+        )
+
+    assert payload["status"] == "degraded"
+    assert payload["failure_class"] == "task_llm_degraded"
+    assert payload["signals"]["task_llm"]["reason"] == "task_llm_model_failed"
