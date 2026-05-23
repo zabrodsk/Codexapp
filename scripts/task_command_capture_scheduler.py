@@ -22,7 +22,11 @@ from assistant_run_lock import acquire_run_lock, release_run_lock
 from assistant_scheduler_state import AssistantSchedulerState, utc_now_iso
 from discord_task_command_reader import read_discord_task_commands
 from email_task_command_reader import read_email_task_commands
+from meeting_task_signal_reader import collect_meeting_task_signals
+from task_command_acknowledger import maybe_acknowledge_discord_command
 from task_command_interpreter import apply_task_command
+from task_command_ledger import DEFAULT_LEDGER_DB, TaskCommandLedger, command_fingerprint
+from task_command_reconciler import _meeting_signal_to_command
 
 
 WORKFLOW = "task_command_capture_scheduler"
@@ -48,9 +52,11 @@ def run_task_command_capture_scheduler(
     state_file: str | Path | None = DEFAULT_STATE_FILE,
     lock_ttl_seconds: int = DEFAULT_LOCK_TTL_SECONDS,
     write_audit: bool = True,
+    command_ledger_db_path: str | Path | None = DEFAULT_LEDGER_DB,
     discord_payload: dict[str, Any] | None = None,
     email_payload: dict[str, Any] | None = None,
     notion_client: Any | None = None,
+    ack_post_func: Any | None = None,
 ) -> dict[str, Any]:
     selected = sources or ["discord", "email"]
     now = datetime.now(ZoneInfo(TIMEZONE))
@@ -91,6 +97,8 @@ def run_task_command_capture_scheduler(
             discord_payload=discord_payload,
             email_payload=email_payload,
             notion_client=notion_client,
+            command_ledger_db_path=command_ledger_db_path,
+            ack_post_func=ack_post_func,
             run_key=run_key,
         )
         return payload
@@ -127,13 +135,16 @@ def _run_inner(
     discord_payload: dict[str, Any] | None,
     email_payload: dict[str, Any] | None,
     notion_client: Any | None,
+    command_ledger_db_path: str | Path | None,
+    ack_post_func: Any | None,
     run_key: str,
 ) -> dict[str, Any]:
     commands: list[dict[str, Any]] = []
+    ledger = TaskCommandLedger(command_ledger_db_path)
     collection_errors: list[dict[str, Any]] = []
     source_payloads: dict[str, Any] = {}
     if "discord" in selected:
-        payload = discord_payload if discord_payload is not None else read_discord_task_commands(since_minutes=since_minutes, limit=limit)
+        payload = discord_payload if discord_payload is not None else read_discord_task_commands(since_minutes=since_minutes, limit=limit, write_state=True)
         source_payloads["discord"] = _safe_source_summary(payload)
         if payload.get("status") in {"ok", "degraded"}:
             commands.extend(payload.get("commands") or [])
@@ -147,11 +158,24 @@ def _run_inner(
         else:
             collection_errors.append({"source": "email", "reason": payload.get("reason") or payload.get("status")})
 
+    if "meeting" in selected:
+        payload = collect_meeting_task_signals(limit=limit)
+        source_payloads["meeting"] = _safe_source_summary(payload, count_key="signal_count")
+        if payload.get("status") in {"ok", "degraded"}:
+            commands.extend(_meeting_signal_to_command(signal) for signal in (payload.get("signals") or []))
+        else:
+            collection_errors.append({"source": "meeting", "reason": payload.get("reason") or payload.get("status")})
+
     results: list[dict[str, Any]] = []
     tasks_created = 0
     tasks_updated = 0
     manual_review = 0
+    ack_sent = 0
+    ack_failed = 0
     for command in commands[: max(1, int(limit))]:
+        fingerprint = command_fingerprint(command)
+        command["command_fingerprint"] = fingerprint
+        ledger.record_seen(command, status="seen", reason="task_command_capture_seen")
         result = apply_task_command(
             str(command.get("text") or ""),
             source=str(command.get("source") or "Command"),
@@ -161,7 +185,23 @@ def _run_inner(
             ledger_path=ledger_path,
             write_audit=write_audit,
         )
-        results.append(_safe_command_result(result))
+        ledger_status = _ledger_status_for_result(result)
+        ledger.update_outcome(
+            source_ref=str(command.get("source_ref") or ""),
+            command_fingerprint=fingerprint,
+            status=ledger_status,
+            reason=str(result.get("reason") or result.get("status") or ""),
+            task=result.get("task") or {},
+            audit_id=result.get("audit_id"),
+        )
+        ack = {"status": "skipped", "reason": "ack_not_attempted"}
+        if live and ledger_status in {"applied", "skipped_duplicate"}:
+            ack = maybe_acknowledge_discord_command(command, result, ledger=ledger, post_func=ack_post_func)
+            if ack.get("status") == "ack_sent":
+                ack_sent += 1
+            elif ack.get("status") == "ack_failed":
+                ack_failed += 1
+        results.append(_safe_command_result(result, ack=ack, command=command))
         if result.get("status") == "created":
             tasks_created += 1
         elif result.get("status") == "updated":
@@ -173,6 +213,11 @@ def _run_inner(
     reason = "task_command_capture_completed"
     dead_letter = False
     failure_class = None
+    if ack_failed:
+        status = "degraded"
+        reason = "task_command_ack_failed"
+        dead_letter = True
+        failure_class = "task_command_ack_failed"
     if collection_errors:
         status = "degraded"
         reason = "task_command_capture_source_degraded"
@@ -198,6 +243,10 @@ def _run_inner(
         "tasks_created": tasks_created,
         "tasks_updated": tasks_updated,
         "manual_review_count": manual_review,
+        "ack_sent_count": ack_sent,
+        "ack_failed_count": ack_failed,
+        "ledger_counts_by_status": ledger.counts_by_status(),
+        "ledger_counts_by_source": ledger.counts_by_source(),
         "results": results,
         "collection_errors": collection_errors,
         "calendar_write_attempted": False,
@@ -257,6 +306,8 @@ def _finish(
                 "commands_seen": safe.get("commands_seen"),
                 "commands_processed": safe.get("commands_processed"),
                 "manual_review_count": safe.get("manual_review_count"),
+                "ack_sent_count": safe.get("ack_sent_count"),
+                "ack_failed_count": safe.get("ack_failed_count"),
             },
         )
         safe["audit_id"] = event.audit_id
@@ -273,16 +324,30 @@ def _finish(
     return safe
 
 
-def _safe_source_summary(payload: dict[str, Any]) -> dict[str, Any]:
+def _safe_source_summary(payload: dict[str, Any], *, count_key: str = "command_count") -> dict[str, Any]:
     return {
         "status": payload.get("status"),
         "reason": payload.get("reason"),
-        "command_count": payload.get("command_count", 0),
+        "command_count": payload.get(count_key, 0),
         "warning_count": payload.get("warning_count", 0),
     }
 
 
-def _safe_command_result(result: dict[str, Any]) -> dict[str, Any]:
+def _ledger_status_for_result(result: dict[str, Any]) -> str:
+    status = str(result.get("status") or "")
+    reason = str(result.get("reason") or "")
+    if status in {"created", "updated"}:
+        return "applied"
+    if status == "skipped" or "duplicate" in reason:
+        return "skipped_duplicate"
+    if status == "manual_review_required":
+        return "manual_review_required"
+    if status in {"blocked", "failed"}:
+        return "blocked"
+    return "seen"
+
+
+def _safe_command_result(result: dict[str, Any], *, ack: dict[str, Any] | None = None, command: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
         "status": result.get("status"),
         "reason": result.get("reason"),
@@ -291,6 +356,10 @@ def _safe_command_result(result: dict[str, Any]) -> dict[str, Any]:
         "notion_write_attempted": bool(result.get("notion_write_attempted")),
         "task": result.get("task"),
         "match": result.get("match"),
+        "source_ref": (command or {}).get("source_ref"),
+        "source_channel": (command or {}).get("source_channel"),
+        "command_fingerprint": (command or {}).get("command_fingerprint"),
+        "ack": ack or {"status": "skipped", "reason": "ack_not_attempted"},
     }
 
 
@@ -306,6 +375,10 @@ def _write_state_file(path: Path, payload: dict[str, Any]) -> None:
         "tasks_created": payload.get("tasks_created", 0),
         "tasks_updated": payload.get("tasks_updated", 0),
         "manual_review_count": payload.get("manual_review_count", 0),
+        "ack_sent_count": payload.get("ack_sent_count", 0),
+        "ack_failed_count": payload.get("ack_failed_count", 0),
+        "ledger_counts_by_status": payload.get("ledger_counts_by_status", {}),
+        "ledger_counts_by_source": payload.get("ledger_counts_by_source", {}),
         "error_hash": payload.get("error_hash"),
     }
     tmp = path.with_suffix(".tmp")
@@ -341,6 +414,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-file", default=str(DEFAULT_STATE_FILE), dest="state_file")
     parser.add_argument("--lock-ttl-seconds", type=int, default=DEFAULT_LOCK_TTL_SECONDS, dest="lock_ttl_seconds")
     parser.add_argument("--no-write-audit", action="store_false", dest="write_audit", default=True)
+    parser.add_argument("--command-ledger-db", default=str(DEFAULT_LEDGER_DB), dest="command_ledger_db")
     parser.add_argument("--json", action="store_true", dest="json_output")
     return parser
 
@@ -360,6 +434,7 @@ def main(argv: list[str] | None = None) -> int:
         state_file=args.state_file,
         lock_ttl_seconds=args.lock_ttl_seconds,
         write_audit=args.write_audit,
+        command_ledger_db_path=args.command_ledger_db,
     )
     if args.json_output:
         print(json.dumps(payload, indent=2, ensure_ascii=False))

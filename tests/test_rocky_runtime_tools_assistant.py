@@ -30,6 +30,8 @@ from rocky_runtime_tools import (
     cmd_task_detect,
     cmd_task_command_apply,
     cmd_task_command_capture_run,
+    cmd_task_command_recent,
+    cmd_task_command_reconcile,
     cmd_task_detector_llm_health,
     cmd_coding_signal_sync,
     cmd_coding_signal_inspect,
@@ -159,6 +161,8 @@ def test_parser_includes_assistant_commands():
     assert parser.parse_args(["coding-work-llm-health"]).command == "coding-work-llm-health"
     assert parser.parse_args(["task-command-apply", "--text", "remember this"]).command == "task-command-apply"
     assert parser.parse_args(["task-command-capture-run"]).command == "task-command-capture-run"
+    assert parser.parse_args(["task-command-recent"]).command == "task-command-recent"
+    assert parser.parse_args(["task-command-reconcile", "--source", "discord"]).command == "task-command-reconcile"
     assert parser.parse_args(["task-spine-scheduler-run"]).command == "task-spine-scheduler-run"
     assert parser.parse_args(
         ["assistant-notification-dispatch", "--status", "blocked", "--reason", "test", "--dry-run"]
@@ -194,7 +198,13 @@ def test_task_command_runtime_commands_are_wired(capsys, tmp_path):
         assert cmd_task_command_apply(_args(text="remember this", source="Command", source_ref="test:1", live=False, no_llm=True, ledger_path=None, write_audit=False, json_output=True)) == 0
     capsys.readouterr()
     with patch("rocky_runtime_tools.run_task_command_capture_scheduler", return_value={"status": "ok", "reason": "done"}):
-        assert cmd_task_command_capture_run(_args(sources=["discord"], live=True, notify_failures=True, notification_dry_run=True, notification_channel_id=None, since_minutes=10, limit=5, scheduler_db=None, ledger_path=None, state_file=str(tmp_path / "state.json"), lock_ttl_seconds=60, write_audit=False, json_output=True)) == 0
+        assert cmd_task_command_capture_run(_args(sources=["discord"], live=True, notify_failures=True, notification_dry_run=True, notification_channel_id=None, since_minutes=10, limit=5, scheduler_db=None, ledger_path=None, state_file=str(tmp_path / "state.json"), lock_ttl_seconds=60, write_audit=False, command_ledger_db=str(tmp_path / "commands.sqlite3"), json_output=True)) == 0
+    capsys.readouterr()
+    with patch("rocky_runtime_tools.recent_task_commands", return_value={"status": "ok", "command_count": 0, "commands": []}):
+        assert cmd_task_command_recent(_args(limit=5, command_ledger_db=str(tmp_path / "commands.sqlite3"), json_output=True)) == 0
+    capsys.readouterr()
+    with patch("rocky_runtime_tools.reconcile_task_commands", return_value={"status": "ok", "reason": "done", "counts": {}}):
+        assert cmd_task_command_reconcile(_args(sources=["discord"], mark_missing=False, since_minutes=10, since_days=14, limit=5, command_ledger_db=str(tmp_path / "commands.sqlite3"), json_output=True)) == 0
 
 
 def test_coding_work_llm_health_json_uses_safe_helper(capsys):

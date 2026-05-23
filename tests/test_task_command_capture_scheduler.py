@@ -51,6 +51,7 @@ def test_scheduler_dry_run_processes_commands_without_notion_write(tmp_path):
         scheduler_db_path=tmp_path / "scheduler.sqlite3",
         ledger_path=tmp_path / "audit.jsonl",
         state_file=tmp_path / "state.json",
+        command_ledger_db_path=tmp_path / "commands.sqlite3",
         write_audit=True,
     )
 
@@ -76,6 +77,7 @@ def test_scheduler_live_creates_task_and_records_safe_state(tmp_path):
             ledger_path=tmp_path / "audit.jsonl",
             state_file=tmp_path / "state.json",
             write_audit=True,
+            command_ledger_db_path=tmp_path / "commands.sqlite3",
         )
 
     state = json.loads((tmp_path / "state.json").read_text())
@@ -100,8 +102,65 @@ def test_scheduler_manual_review_creates_dead_letter(tmp_path):
         state_file=tmp_path / "state.json",
         write_audit=True,
         notify_failures=False,
+        command_ledger_db_path=tmp_path / "commands.sqlite3",
     )
 
     assert payload["status"] == "manual_review_required"
     assert payload["dead_letter"]["failure_class"] == "task_command_manual_review_required"
     assert payload["calendar_write_attempted"] is False
+
+
+def test_scheduler_records_ledger_and_sends_discord_ack(tmp_path):
+    fake = FakeNotion()
+    posted = []
+    def post_func(**kwargs):
+        posted.append(kwargs)
+        return {"status": "posted", "channel_id": kwargs["channel_id"], "message_ids": ["ack1"]}
+    with patch("task_command_interpreter.load_notion_task_config", return_value=_config(tmp_path)):
+        payload = run_task_command_capture_scheduler(
+            sources=["discord"],
+            live=True,
+            discord_payload={
+                "status": "ok",
+                "commands": [{"source": "Discord", "source_channel": "discord", "source_ref": "discord:c:m", "text": "Rocky remember to call Jana", "channel_id": "c"}],
+                "command_count": 1,
+            },
+            notion_client=fake,
+            scheduler_db_path=tmp_path / "scheduler.sqlite3",
+            ledger_path=tmp_path / "audit.jsonl",
+            state_file=tmp_path / "state.json",
+            command_ledger_db_path=tmp_path / "commands.sqlite3",
+            ack_post_func=post_func,
+            write_audit=True,
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["ack_sent_count"] == 1
+    assert payload["ledger_counts_by_status"]["ack_sent"] == 1
+    assert posted[0]["content"].startswith("Got it. Added task:")
+
+
+def test_scheduler_ack_failure_dead_letters_but_task_is_created(tmp_path):
+    fake = FakeNotion()
+    with patch("task_command_interpreter.load_notion_task_config", return_value=_config(tmp_path)):
+        payload = run_task_command_capture_scheduler(
+            sources=["discord"],
+            live=True,
+            discord_payload={
+                "status": "ok",
+                "commands": [{"source": "Discord", "source_channel": "discord", "source_ref": "discord:c:m", "text": "Rocky remember to call Jana", "channel_id": "c"}],
+                "command_count": 1,
+            },
+            notion_client=fake,
+            scheduler_db_path=tmp_path / "scheduler.sqlite3",
+            ledger_path=tmp_path / "audit.jsonl",
+            state_file=tmp_path / "state.json",
+            command_ledger_db_path=tmp_path / "commands.sqlite3",
+            ack_post_func=lambda **_: {"status": "failed", "reason": "discord_http_500"},
+            write_audit=True,
+        )
+
+    assert payload["status"] == "degraded"
+    assert payload["tasks_created"] == 1
+    assert payload["ack_failed_count"] == 1
+    assert payload["dead_letter"]["failure_class"] == "task_command_ack_failed"

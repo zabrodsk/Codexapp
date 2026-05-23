@@ -62,3 +62,30 @@ def test_meeting_reader_ignores_curation_boilerplate(tmp_path):
 
     assert payload["status"] == "ok"
     assert payload["signals"] == []
+
+
+def test_meeting_parser_handles_inline_owner_and_checkbox_patterns(tmp_path):
+    note = tmp_path / "meeting-inline.md"
+    note.write_text(
+        """# meeting-inline
+---
+title: Inline actions
+---
+
+## Next steps
+- Dusan: follow up with Jana about the deck.
+- [[Dusan Zabrodsky]] - prepare investor update.
+- [ ] Dusan - send revised notes.
+- Petr: prepare unrelated analysis.
+""",
+        encoding="utf-8",
+    )
+
+    payload = collect_meeting_task_signals(meeting_dir=tmp_path, since_days=14, now=datetime.now(timezone.utc))
+
+    summaries = [signal["summary"] for signal in payload["signals"]]
+    assert payload["signal_count"] == 3
+    assert any("follow up with Jana" in item for item in summaries)
+    assert any("prepare investor update" in item for item in summaries)
+    assert any("send revised notes" in item for item in summaries)
+    assert not any("unrelated analysis" in item for item in summaries)

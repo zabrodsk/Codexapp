@@ -25,13 +25,15 @@ ACTION_HEADING_RE = re.compile(
 HEADING_RE = re.compile(r"^##+\s+", re.MULTILINE)
 OWNER_RE = re.compile(r"^\s*\*\*([^*]{2,120})\*\*\s*$")
 LIST_MARKER_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
+CHECKBOX_RE = re.compile(r"^\s*\[[ xX]\]\s+")
+OWNER_ACTION_RE = re.compile(r"^\s*(?P<owner>(?:\[\[[^\]]+\]\]|[A-ZÁ-Ž][^:–—-]{1,80}?))\s*(?::|[-–—])\s*(?P<action>\S.{4,})$")
 SENSITIVE_TEXT_RE = re.compile(
     r"(https?://[^\s]*(?:token|secret|password|credential|auth|cookie)[^\s]*|"
     r"cookie|token|secret|password|credential|Bearer\s+|\bsk-[A-Za-z0-9])",
     re.IGNORECASE,
 )
 NOISE_RE = re.compile(
-    r"(no action|none\b|n/?a\b|recheck transcript|source context captured|meeting ingestion|"
+    r"(no action|none\b|\bn/?a\b|recheck transcript|source context captured|meeting ingestion|"
     r"transcript-first|smarty curation|frontmatter|keywords?\b|durable context\b)",
     re.IGNORECASE,
 )
@@ -111,19 +113,23 @@ def _signals_from_file(path: Path, *, observed_at: str) -> list[dict[str, Any]]:
             if owner_match:
                 owner = owner_match.group(1).strip()
                 continue
-            if _looks_owner_line(line):
+            if _looks_owner_line(line) and not LIST_MARKER_RE.match(line):
                 owner = line.strip().strip(":")
                 continue
             action = _normalize_action_line(line)
+            parsed_owner, parsed_action = _split_owner_action(action)
+            effective_owner = parsed_owner or owner
+            if parsed_action:
+                action = parsed_action
             if not action or _is_noise(action) or _looks_owner_line(action):
                 continue
-            requires_dusan = _is_dusan(owner) or _mentions_dusan(action)
-            if not requires_dusan and owner != "Unknown":
+            requires_dusan = _is_dusan(effective_owner) or _mentions_dusan(action)
+            if not requires_dusan and effective_owner != "Unknown":
                 continue
             if not requires_dusan and not ACTION_VERB_RE.search(action):
                 continue
             source_ref = f"obsidian-meeting:{_hash_text(str(path))}:action:{_hash_text(str(section_index) + action)}"
-            summary = _safe_text(f"{title}: {owner if owner != 'Unknown' else 'Action'} - {action}", 900)
+            summary = _safe_text(f"{title}: {effective_owner if effective_owner != 'Unknown' else 'Action'} - {action}", 900)
             signals.append(
                 {
                     "signal_id": f"signal:{_hash_text(source_ref + summary)}",
@@ -137,7 +143,7 @@ def _signals_from_file(path: Path, *, observed_at: str) -> list[dict[str, Any]]:
                     "untrusted": True,
                     "path": str(path),
                     "meeting_title": _safe_text(title, 180),
-                    "owner_hint": _safe_text(owner, 120),
+                    "owner_hint": _safe_text(effective_owner, 120),
                     "meeting_source_refs": source_refs[:5],
                 }
             )
@@ -189,8 +195,21 @@ def _extract_source_refs(text: str) -> list[str]:
 
 def _normalize_action_line(line: str) -> str:
     line = LIST_MARKER_RE.sub("", line).strip()
+    line = CHECKBOX_RE.sub("", line).strip()
     line = re.sub(r"\s+", " ", line)
     return line.strip("-* ")
+
+
+def _split_owner_action(text: str) -> tuple[str | None, str | None]:
+    match = OWNER_ACTION_RE.match(str(text or "").strip())
+    if not match:
+        return None, None
+    owner = match.group("owner").strip().strip(":")
+    action = match.group("action").strip()
+    if ACTION_VERB_RE.search(owner) or not ACTION_VERB_RE.search(action):
+        return None, None
+    owner = owner.strip("[]") if owner.startswith("[[") and owner.endswith("]]" ) else owner
+    return owner, action
 
 
 def _is_noise(text: str) -> bool:

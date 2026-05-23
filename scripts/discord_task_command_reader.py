@@ -35,6 +35,7 @@ def read_discord_task_commands(
     limit: int = 25,
     http_get: Any | None = None,
     now: datetime | None = None,
+    write_state: bool = True,
 ) -> dict[str, Any]:
     cfg = _load_config(Path(config_path))
     token = cfg.get("token") or os.getenv("DISCORD_TOKEN")
@@ -82,7 +83,7 @@ def read_discord_task_commands(
                     latest_by_channel[str(channel_id)] = max(str(latest_by_channel.get(str(channel_id)) or ""), message_id)
         except Exception as exc:
             warnings.append({"channel_id_hash": _hash_text(str(channel_id)), "reason": "discord_command_read_failed", "error_hash": _hash_text(str(exc))})
-    if latest_by_channel:
+    if latest_by_channel and write_state:
         _write_state(state_path, state, latest_by_channel)
     limited = commands[: max(1, int(limit))]
     return {

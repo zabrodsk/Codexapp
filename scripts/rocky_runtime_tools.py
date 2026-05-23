@@ -118,6 +118,7 @@ from task_deduper import dedupe_task_candidates
 from task_identity_resolver import resolve_task_identities
 from task_lifecycle_engine import run_task_lifecycle
 from task_command_capture_scheduler import run_task_command_capture_scheduler
+from task_command_reconciler import reconcile_task_commands, recent_task_commands
 from task_command_interpreter import apply_task_command
 from task_detector import detect_task_candidates
 from task_focus_live_booking import book_task_focus_proposal
@@ -177,6 +178,9 @@ RUNTIME_DEPLOYABLE_FILES = (
     "scripts/discord_task_command_reader.py",
     "scripts/email_task_command_reader.py",
     "scripts/task_command_capture_scheduler.py",
+    "scripts/task_command_ledger.py",
+    "scripts/task_command_reconciler.py",
+    "scripts/task_command_acknowledger.py",
     "scripts/task_command_interpreter.py",
     "scripts/task_deduper.py",
     "scripts/task_detector.py",
@@ -964,7 +968,28 @@ def build_parser() -> argparse.ArgumentParser:
     task_command_capture.add_argument("--state-file", default="/Users/clawdbot/.openclaw/state/task_command_capture_scheduler.json", dest="state_file")
     task_command_capture.add_argument("--lock-ttl-seconds", type=int, default=240, dest="lock_ttl_seconds")
     task_command_capture.add_argument("--no-write-audit", action="store_false", dest="write_audit", default=True)
+    task_command_capture.add_argument("--command-ledger-db", dest="command_ledger_db")
     task_command_capture.add_argument("--json", action="store_true", dest="json_output")
+
+    task_command_recent = sub.add_parser(
+        "task-command-recent",
+        help="Show recent captured task commands and source-level outcomes.",
+    )
+    task_command_recent.add_argument("--limit", type=int, default=20)
+    task_command_recent.add_argument("--command-ledger-db", dest="command_ledger_db")
+    task_command_recent.add_argument("--json", action="store_true", dest="json_output")
+
+    task_command_reconcile = sub.add_parser(
+        "task-command-reconcile",
+        help="Reconcile Discord/email/meeting command sources against the task command ledger.",
+    )
+    task_command_reconcile.add_argument("--source", action="append", dest="sources")
+    task_command_reconcile.add_argument("--mark-missing", action="store_true", dest="mark_missing")
+    task_command_reconcile.add_argument("--since-minutes", type=int, default=60, dest="since_minutes")
+    task_command_reconcile.add_argument("--since-days", type=int, default=14, dest="since_days")
+    task_command_reconcile.add_argument("--limit", type=int, default=50)
+    task_command_reconcile.add_argument("--command-ledger-db", dest="command_ledger_db")
+    task_command_reconcile.add_argument("--json", action="store_true", dest="json_output")
 
     task_scheduler = sub.add_parser(
         "task-spine-scheduler-run",
@@ -3187,12 +3212,42 @@ def cmd_task_command_capture_run(args) -> int:
         state_file=args.state_file,
         lock_ttl_seconds=args.lock_ttl_seconds,
         write_audit=args.write_audit,
+        command_ledger_db_path=args.command_ledger_db,
     )
     if args.json_output:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
     else:
         print(f"Task command capture: {payload.get('status')} ({payload.get('reason')})")
     return 0 if payload.get("status") in {"ok", "degraded", "skipped_duplicate_run"} else 1
+
+
+def cmd_task_command_recent(args) -> int:
+    payload = recent_task_commands(ledger_db_path=args.command_ledger_db, limit=args.limit)
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Task commands: {payload.get('command_count', 0)} recent")
+        for item in payload.get("commands", []):
+            print(f"- {item.get('source_channel')} {item.get('status')}: {item.get('text_preview')} [{item.get('source_ref')}]")
+    return 0
+
+
+def cmd_task_command_reconcile(args) -> int:
+    payload = reconcile_task_commands(
+        sources=args.sources,
+        ledger_db_path=args.command_ledger_db,
+        since_minutes=args.since_minutes,
+        since_days=args.since_days,
+        limit=args.limit,
+        mark_missing=args.mark_missing,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Task command reconcile: {payload.get('status')} ({payload.get('reason')})")
+        for status, count in sorted((payload.get("counts") or {}).items()):
+            print(f"- {status}: {count}")
+    return 0
 
 
 def cmd_task_spine_scheduler_run(args) -> int:
@@ -3519,6 +3574,8 @@ def main() -> int:
         "coding-work-llm-health": cmd_coding_work_llm_health,
         "task-command-apply": cmd_task_command_apply,
         "task-command-capture-run": cmd_task_command_capture_run,
+        "task-command-recent": cmd_task_command_recent,
+        "task-command-reconcile": cmd_task_command_reconcile,
         "task-spine-scheduler-run": cmd_task_spine_scheduler_run,
         "assistant-notification-dispatch": cmd_assistant_notification_dispatch,
         "agentmail-bridge-health": cmd_agentmail_bridge_health,

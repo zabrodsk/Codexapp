@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 from assistant_audit_log import AssistantAuditLog
 from assistant_launchd import LaunchAgentSpec, inspect_launchagent
 from assistant_scheduler_state import AssistantSchedulerState, utc_now_iso
+from task_command_ledger import TaskCommandLedger
 
 
 SCHEDULER_POLICY_VERSION = "rocky-scheduler-policy-v1"
@@ -519,6 +520,10 @@ def _helper_state(spec: SchedulerJobSpec) -> dict[str, Any]:
         "tasks_created",
         "tasks_updated",
         "manual_review_count",
+        "ack_sent_count",
+        "ack_failed_count",
+        "ledger_counts_by_status",
+        "ledger_counts_by_source",
         "error_hash",
         "llm",
     ]
@@ -637,6 +642,17 @@ def evaluate_scheduler_job(
 
     proxy_state = _helper_state(spec)
     signals["helper_state"] = proxy_state
+    if spec.job_name == "task_command_capture":
+        try:
+            ledger = TaskCommandLedger()
+            signals["task_command_ledger"] = {
+                "status": "ok",
+                "counts_by_status": ledger.counts_by_status(),
+                "counts_by_source": ledger.counts_by_source(),
+            }
+        except Exception as exc:
+            signals["task_command_ledger"] = {"status": "degraded", "failure_class": "task_command_ledger_unreadable", "error_hash": _hash_text(str(exc))}
+            issues.append({"status": "degraded", "failure_class": "task_command_ledger_unreadable", "summary": "Task command ledger could not be read."})
     if proxy_state.get("status") == "degraded":
         issues.append(
             {
