@@ -445,6 +445,76 @@ def update_task_reminder_metadata(
     }
 
 
+def update_task_status(
+    *,
+    page_id: str,
+    status: str,
+    lifecycle_reason: str,
+    completion_signal: str | None = None,
+    cancelled_archived_reason: str | None = None,
+    config: NotionTaskConfig | None = None,
+    client: Any | None = None,
+) -> dict[str, Any]:
+    """Update terminal/open task status through Notion only."""
+    config = config or load_notion_task_config()
+    if not config.token_configured:
+        return {"status": "blocked", "reason": "notion_token_missing", "notion_write_attempted": False}
+    if not page_id:
+        return {"status": "blocked", "reason": "notion_page_id_missing", "notion_write_attempted": False}
+    notion = client or NotionClient(config.token or "")
+    props = {
+        "Status": _select_prop(_safe_status(status)),
+        "Last lifecycle reason": _rich_text_prop(lifecycle_reason),
+        "Updated date": _date_prop(date.today().isoformat()),
+    }
+    if completion_signal:
+        props["Completion signal"] = _rich_text_prop(completion_signal)
+    if cancelled_archived_reason:
+        props["Cancelled/archived reason"] = _rich_text_prop(cancelled_archived_reason)
+    updated = notion.update_page(page_id, properties=props)
+    return {
+        "status": "updated",
+        "reason": lifecycle_reason,
+        "page_id": updated.get("id") or page_id,
+        "task_status": _safe_status(status),
+        "calendar_write_attempted": False,
+        "notion_write_attempted": True,
+    }
+
+
+def update_task_due_date(
+    *,
+    page_id: str,
+    due_date: str,
+    lifecycle_reason: str = "due_date_updated",
+    config: NotionTaskConfig | None = None,
+    client: Any | None = None,
+) -> dict[str, Any]:
+    """Update a task due date without touching Calendar."""
+    config = config or load_notion_task_config()
+    if not config.token_configured:
+        return {"status": "blocked", "reason": "notion_token_missing", "notion_write_attempted": False}
+    if not page_id:
+        return {"status": "blocked", "reason": "notion_page_id_missing", "notion_write_attempted": False}
+    if not re.fullmatch(r"20\d{2}-\d{2}-\d{2}", str(due_date or "")):
+        return {"status": "blocked", "reason": "invalid_due_date", "notion_write_attempted": False}
+    notion = client or NotionClient(config.token or "")
+    props = {
+        "Due date": _date_prop(due_date),
+        "Last lifecycle reason": _rich_text_prop(lifecycle_reason),
+        "Updated date": _date_prop(date.today().isoformat()),
+    }
+    updated = notion.update_page(page_id, properties=props)
+    return {
+        "status": "updated",
+        "reason": lifecycle_reason,
+        "page_id": updated.get("id") or page_id,
+        "due_date": due_date,
+        "calendar_write_attempted": False,
+        "notion_write_attempted": True,
+    }
+
+
 def task_to_notion_properties(task: dict[str, Any]) -> dict[str, Any]:
     due_date = task.get("due_date")
     today = date.today().isoformat()
@@ -655,6 +725,8 @@ def _safe_task_summary(task: dict[str, Any]) -> dict[str, Any]:
             "source_ref": task.get("source_ref"),
             "confidence": task.get("confidence"),
             "dedupe_key": task.get("dedupe_key"),
+            "action_fingerprint": task.get("action_fingerprint"),
+            "rocky_task_id": task.get("rocky_task_id"),
             "estimated_effort_minutes": task.get("estimated_effort_minutes"),
         }
     )

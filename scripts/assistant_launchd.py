@@ -27,6 +27,7 @@ class LaunchAgentSpec:
     minute: int
     timezone: str = "Europe/Prague"
     first_expected_run_after: str | None = None
+    start_interval_seconds: int | None = None
 
     @property
     def program(self) -> str:
@@ -104,6 +105,11 @@ def launchd_weekday(day: datetime) -> int:
 def expected_run_bounds(spec: LaunchAgentSpec, *, now: datetime | None = None) -> tuple[datetime | None, datetime | None]:
     tz = ZoneInfo(spec.timezone)
     now = now.astimezone(tz) if now else datetime.now(tz)
+    if spec.start_interval_seconds:
+        interval = max(1, int(spec.start_interval_seconds))
+        previous = now - timedelta(seconds=interval)
+        next_run = now + timedelta(seconds=interval)
+        return previous, next_run
     previous: datetime | None = None
     next_run: datetime | None = None
     for offset in range(-14, 15):
@@ -192,11 +198,16 @@ def inspect_launchagent(
             issues.append("launchagent_stdout_path_mismatch")
         if str(plist.get("StandardErrorPath") or "") != spec.stderr_path:
             issues.append("launchagent_stderr_path_mismatch")
-        actual_schedule = normalize_start_calendar_interval(plist.get("StartCalendarInterval"))
-        expected_schedule = expected_calendar_interval(spec)
-        if actual_schedule != expected_schedule:
-            issues.append("launchagent_schedule_mismatch")
-            failure_class = failure_class or "launchagent_schedule_mismatch"
+        if spec.start_interval_seconds:
+            if int(plist.get("StartInterval") or 0) != int(spec.start_interval_seconds):
+                issues.append("launchagent_schedule_mismatch")
+                failure_class = failure_class or "launchagent_schedule_mismatch"
+        else:
+            actual_schedule = normalize_start_calendar_interval(plist.get("StartCalendarInterval"))
+            expected_schedule = expected_calendar_interval(spec)
+            if actual_schedule != expected_schedule:
+                issues.append("launchagent_schedule_mismatch")
+                failure_class = failure_class or "launchagent_schedule_mismatch"
 
     if len(spec.program_arguments) > 1:
         helper_path = Path(spec.program_arguments[1])

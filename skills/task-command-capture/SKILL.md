@@ -21,3 +21,11 @@ Use this skill when Dusan explicitly tells Rocky to remember a task through Disc
 ```bash
 /Users/clawdbot/.openclaw/workspace/.venv/bin/python scripts/rocky_runtime_tools.py task-command-apply --text "Follow up with Jana on Monday" --live --json
 ```
+
+## Sprint 8 Contract Update
+
+Primary path: `task_command_interpreter.py` classifies trusted direct commands and applies them through Notion identity matching. It supports create, mark done, cancel, due-date update, and manual-review outcomes. Ambiguous matches, terminal matches, and prompt-injection-like text must not mutate tasks automatically.
+
+Runtime surfaces:
+- `task-command-apply --text TEXT --source SOURCE --source-ref REF --live --json`
+- `task-command-capture-run --source discord --source email --live --notify-failures --json`

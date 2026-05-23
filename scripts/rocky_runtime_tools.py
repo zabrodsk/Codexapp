@@ -112,9 +112,12 @@ from notion_task_manager import (
     notion_task_health,
     upsert_task,
 )
+from meeting_task_signal_reader import collect_meeting_task_signals
 from task_deduper import dedupe_task_candidates
 from task_identity_resolver import resolve_task_identities
 from task_lifecycle_engine import run_task_lifecycle
+from task_command_capture_scheduler import run_task_command_capture_scheduler
+from task_command_interpreter import apply_task_command
 from task_detector import detect_task_candidates
 from task_focus_live_booking import book_task_focus_proposal
 from task_focus_proposal_engine import build_task_focus_proposals
@@ -167,6 +170,11 @@ RUNTIME_DEPLOYABLE_FILES = (
     "scripts/email_triage_scheduler.py",
     "scripts/email_triage_time_estimator.py",
     "scripts/notion_task_manager.py",
+    "scripts/meeting_task_signal_reader.py",
+    "scripts/discord_task_command_reader.py",
+    "scripts/email_task_command_reader.py",
+    "scripts/task_command_capture_scheduler.py",
+    "scripts/task_command_interpreter.py",
     "scripts/task_deduper.py",
     "scripts/task_detector.py",
     "scripts/task_focus_live_booking.py",
@@ -178,6 +186,9 @@ RUNTIME_DEPLOYABLE_FILES = (
     "scripts/task_spine_scheduler.py",
     "skills/notion-task-manager/SKILL.md",
     "skills/task-command-capture/SKILL.md",
+    "skills/meeting-task-capture/SKILL.md",
+    "skills/discord-task-capture/SKILL.md",
+    "skills/email-command-capture/SKILL.md",
     "skills/task-deduper/SKILL.md",
     "skills/task-detector/SKILL.md",
     "skills/task-focus-calendar/SKILL.md",
@@ -831,6 +842,15 @@ def build_parser() -> argparse.ArgumentParser:
     task_detect.add_argument("--no-llm", action="store_true", dest="no_llm")
     task_detect.add_argument("--json", action="store_true", dest="json_output")
 
+    meeting_task_signals = sub.add_parser(
+        "meeting-task-signals",
+        help="Collect direct task signals from recent Rocky meeting action sections.",
+    )
+    meeting_task_signals.add_argument("--meeting-dir", dest="meeting_dir")
+    meeting_task_signals.add_argument("--since-days", type=int, default=14)
+    meeting_task_signals.add_argument("--limit", type=int, default=30)
+    meeting_task_signals.add_argument("--json", action="store_true", dest="json_output")
+
     task_llm_health = sub.add_parser(
         "task-detector-llm-health",
         help="Check Rocky's task-detector Codex LLM path without writing Notion or Calendar.",
@@ -905,7 +925,34 @@ def build_parser() -> argparse.ArgumentParser:
     task_command.add_argument("--source", default="Command")
     task_command.add_argument("--source-ref", default="manual:command", dest="source_ref")
     task_command.add_argument("--live", action="store_true")
+    task_command.add_argument("--no-llm", action="store_true", dest="no_llm")
+    task_command.add_argument("--ledger-path", dest="ledger_path")
+    task_command.add_argument(
+        "--no-write-audit",
+        action="store_false",
+        dest="write_audit",
+        default=True,
+        help="Do not append assistant audit events.",
+    )
     task_command.add_argument("--json", action="store_true", dest="json_output")
+
+    task_command_capture = sub.add_parser(
+        "task-command-capture-run",
+        help="Run Rocky's near-real-time Discord/email task command capture scheduler.",
+    )
+    task_command_capture.add_argument("--source", action="append", dest="sources")
+    task_command_capture.add_argument("--live", action="store_true")
+    task_command_capture.add_argument("--notify-failures", action="store_true", dest="notify_failures")
+    task_command_capture.add_argument("--notification-dry-run", action="store_true", dest="notification_dry_run")
+    task_command_capture.add_argument("--notification-channel-id", dest="notification_channel_id")
+    task_command_capture.add_argument("--since-minutes", type=int, default=10, dest="since_minutes")
+    task_command_capture.add_argument("--limit", type=int, default=20)
+    task_command_capture.add_argument("--scheduler-db", dest="scheduler_db")
+    task_command_capture.add_argument("--ledger-path", dest="ledger_path")
+    task_command_capture.add_argument("--state-file", default="/Users/clawdbot/.openclaw/state/task_command_capture_scheduler.json", dest="state_file")
+    task_command_capture.add_argument("--lock-ttl-seconds", type=int, default=240, dest="lock_ttl_seconds")
+    task_command_capture.add_argument("--no-write-audit", action="store_false", dest="write_audit", default=True)
+    task_command_capture.add_argument("--json", action="store_true", dest="json_output")
 
     task_scheduler = sub.add_parser(
         "task-spine-scheduler-run",
@@ -3077,19 +3124,55 @@ def cmd_coding_work_llm_health(args) -> int:
 
 
 def cmd_task_command_apply(args) -> int:
-    signal = build_manual_task_signal(args.text, source=args.source, source_ref=args.source_ref)
-    detected = detect_task_candidates([signal], use_llm=False, max_candidates=1)
-    candidates = detected.get("candidates") or []
-    if not candidates:
-        payload = {"status": "blocked", "reason": "task_not_detected", "calendar_write_attempted": False, "notion_write_attempted": False}
-    else:
-        task = candidates[0]
-        payload = upsert_task(task, live=args.live)
+    payload = apply_task_command(
+        args.text,
+        source=args.source,
+        source_ref=args.source_ref,
+        live=args.live,
+        use_llm=not getattr(args, "no_llm", False),
+        ledger_path=getattr(args, "ledger_path", None),
+        write_audit=getattr(args, "write_audit", True),
+    )
     if args.json_output:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
     else:
         print(f"Task command: {payload.get('status')} ({payload.get('reason')})")
     return 0 if payload.get("status") in {"created", "updated", "dry_run"} else 1
+
+
+def cmd_meeting_task_signals(args) -> int:
+    payload = collect_meeting_task_signals(
+        meeting_dir=args.meeting_dir or "/Users/clawdbot/Documents/VAULT/Rocky/OpenClaw Memory/meetings",
+        since_days=args.since_days,
+        limit=args.limit,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Meeting task signals: {payload.get('status')} ({payload.get('signal_count', 0)} signals)")
+    return 0 if payload.get("status") in {"ok", "degraded"} else 1
+
+
+def cmd_task_command_capture_run(args) -> int:
+    payload = run_task_command_capture_scheduler(
+        sources=args.sources,
+        live=args.live,
+        notify_failures=args.notify_failures,
+        notification_dry_run=args.notification_dry_run,
+        notification_channel_id=args.notification_channel_id,
+        since_minutes=args.since_minutes,
+        limit=args.limit,
+        scheduler_db_path=args.scheduler_db,
+        ledger_path=args.ledger_path,
+        state_file=args.state_file,
+        lock_ttl_seconds=args.lock_ttl_seconds,
+        write_audit=args.write_audit,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Task command capture: {payload.get('status')} ({payload.get('reason')})")
+    return 0 if payload.get("status") in {"ok", "degraded", "skipped_duplicate_run"} else 1
 
 
 def cmd_task_spine_scheduler_run(args) -> int:
@@ -3386,6 +3469,7 @@ def main() -> int:
         "notion-task-schema-ensure": cmd_notion_task_schema_ensure,
         "notion-task-list": cmd_notion_task_list,
         "task-detect": cmd_task_detect,
+        "meeting-task-signals": cmd_meeting_task_signals,
         "task-detector-llm-health": cmd_task_detector_llm_health,
         "task-reminders-run": cmd_task_reminders_run,
         "task-lifecycle-run": cmd_task_lifecycle_run,
@@ -3400,6 +3484,7 @@ def main() -> int:
         "coding-work-scheduler-run": cmd_coding_work_scheduler_run,
         "coding-work-llm-health": cmd_coding_work_llm_health,
         "task-command-apply": cmd_task_command_apply,
+        "task-command-capture-run": cmd_task_command_capture_run,
         "task-spine-scheduler-run": cmd_task_spine_scheduler_run,
         "assistant-notification-dispatch": cmd_assistant_notification_dispatch,
         "assistant-scheduler-health": cmd_assistant_scheduler_health,

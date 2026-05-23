@@ -21,3 +21,7 @@ Use this skill when Rocky needs to pick due tasks, batch reminders, and optional
 ```bash
 /Users/clawdbot/.openclaw/workspace/.venv/bin/python scripts/rocky_runtime_tools.py task-reminders-run --notify --live --json
 ```
+
+## Sprint 8 Contract Update
+
+Command capture may update task lifecycle metadata, but proactive task focus calendar booking remains subject to the no-Friday/Saturday/Sunday guardrail. Reminder notifications should stay failure/manual-review oriented unless explicitly requested.

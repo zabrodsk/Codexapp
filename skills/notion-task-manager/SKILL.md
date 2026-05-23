@@ -22,3 +22,7 @@ Use this skill when Rocky needs to create, update, inspect, repair, or lifecycle
 /Users/clawdbot/.openclaw/workspace/.venv/bin/python scripts/rocky_runtime_tools.py notion-task-health --json
 /Users/clawdbot/.openclaw/workspace/.venv/bin/python scripts/rocky_runtime_tools.py notion-task-schema-ensure --live --json
 ```
+
+## Sprint 8 Contract Update
+
+The task manager may update task status and due dates for explicit trusted commands after identity matching. Done, Cancelled, and Archived tasks remain terminal and must not be reopened automatically.

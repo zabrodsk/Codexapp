@@ -85,6 +85,13 @@ CODING_WORK_DIRECT_PROGRAM_ARGUMENTS = [
     "--notify",
     "--json",
 ]
+TASK_COMMAND_CAPTURE_DIRECT_PROGRAM_ARGUMENTS = [
+    "/Users/clawdbot/.openclaw/workspace/.venv/bin/python",
+    "/Users/clawdbot/.openclaw/workspace/scripts/task_command_capture_scheduler.py",
+    "--live",
+    "--notify-failures",
+    "--json",
+]
 
 
 @dataclass(frozen=True)
@@ -221,12 +228,36 @@ CODING_WORK_BRIEFING_SPEC = SchedulerJobSpec(
     first_expected_run_after="2026-05-25T12:05:00+02:00",
 )
 
+TASK_COMMAND_CAPTURE_SPEC = SchedulerJobSpec(
+    job_name="task_command_capture",
+    job_label="Rocky task command capture",
+    workflow="task_command_capture_scheduler",
+    launchagent=LaunchAgentSpec(
+        label="com.openclaw.rocky-task-command-capture",
+        plist_path="/Users/clawdbot/Library/LaunchAgents/com.openclaw.rocky-task-command-capture.plist",
+        program_arguments=TASK_COMMAND_CAPTURE_DIRECT_PROGRAM_ARGUMENTS,
+        working_directory="/Users/clawdbot/.openclaw/workspace",
+        stdout_path="/Users/clawdbot/.openclaw/logs/rocky-task-command-capture.log",
+        stderr_path="/Users/clawdbot/.openclaw/logs/rocky-task-command-capture.err.log",
+        weekdays=[0, 1, 2, 3, 4, 5, 6],
+        hour=0,
+        minute=0,
+        timezone="Europe/Prague",
+        first_expected_run_after="2026-05-23T00:00:00+02:00",
+        start_interval_seconds=300,
+    ),
+    state_path="/Users/clawdbot/.openclaw/state/task_command_capture_scheduler.json",
+    first_expected_run_after="2026-05-23T00:00:00+02:00",
+    missing_log_grace_minutes=20,
+)
+
 JOB_REGISTRY = {
     BETTY_MAIL_TRIAGE_SPEC.job_name: BETTY_MAIL_TRIAGE_SPEC,
     TRAINING_CALENDAR_BOOKING_SPEC.job_name: TRAINING_CALENDAR_BOOKING_SPEC,
     EMAIL_TRIAGE_BOOKING_SPEC.job_name: EMAIL_TRIAGE_BOOKING_SPEC,
     TASK_SPINE_SPEC.job_name: TASK_SPINE_SPEC,
     CODING_WORK_BRIEFING_SPEC.job_name: CODING_WORK_BRIEFING_SPEC,
+    TASK_COMMAND_CAPTURE_SPEC.job_name: TASK_COMMAND_CAPTURE_SPEC,
 }
 
 
@@ -329,6 +360,15 @@ def launchagent_execution_mode(program_arguments: list[str]) -> str:
         and any(arg.endswith("coding_work_scheduler.py") for arg in program_arguments)
         and "--live" in program_arguments
         and "--notify" in program_arguments
+        and "--json" in program_arguments
+    ):
+        return "direct_launchd_python"
+    if (
+        program_arguments
+        and program_arguments[0].endswith("/python")
+        and any(arg.endswith("task_command_capture_scheduler.py") for arg in program_arguments)
+        and "--live" in program_arguments
+        and "--notify-failures" in program_arguments
         and "--json" in program_arguments
     ):
         return "direct_launchd_python"
@@ -474,6 +514,11 @@ def _helper_state(spec: SchedulerJobSpec) -> dict[str, Any]:
         "skipped_count",
         "blocked_count",
         "work_item_count",
+        "commands_seen",
+        "commands_processed",
+        "tasks_created",
+        "tasks_updated",
+        "manual_review_count",
         "error_hash",
         "llm",
     ]
@@ -540,7 +585,7 @@ def evaluate_scheduler_job(
                     "summary": f"{spec.job_label} LaunchAgent uses the localhost SSH bridge, but localhost SSH is unavailable.",
                 }
             )
-    if spec.job_name in {"training_calendar_booking", "email_triage_booking", "task_spine", "coding_work_briefing"}:
+    if spec.job_name in {"training_calendar_booking", "email_triage_booking", "task_spine", "coding_work_briefing", "task_command_capture"}:
         if execution_mode == "localhost_ssh_bridge":
             pass
         elif execution_mode == "custom":
@@ -600,7 +645,7 @@ def evaluate_scheduler_job(
                 "summary": proxy_state.get("summary") or "Helper state is degraded.",
             }
         )
-    if spec.job_name in {"training_calendar_booking", "email_triage_booking", "task_spine", "coding_work_briefing"}:
+    if spec.job_name in {"training_calendar_booking", "email_triage_booking", "task_spine", "coding_work_briefing", "task_command_capture"}:
         helper_payload = proxy_state.get("state") or {}
         if helper_payload.get("error_hash"):
             issues.append(

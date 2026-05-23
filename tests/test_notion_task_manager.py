@@ -14,6 +14,8 @@ from notion_task_manager import (
     load_notion_task_config,
     notion_task_health,
     task_database_properties,
+    update_task_due_date,
+    update_task_status,
     upsert_task,
 )
 
@@ -194,6 +196,38 @@ def test_upsert_task_does_not_blindly_fall_back_to_source_ref(tmp_path):
 
     assert payload["status"] == "created"
     assert fake.updated_pages == []
+
+
+def test_update_task_status_and_due_date_are_notion_only(tmp_path):
+    fake = FakeNotion()
+    config = NotionTaskConfig(
+        token="secret-token",
+        database_id="db-id",
+        parent_page_id="parent-id",
+        state_file=tmp_path / "state.json",
+        openclaw_config_path=tmp_path / "openclaw.json",
+    )
+
+    done = update_task_status(
+        page_id="page-1",
+        status="Done",
+        lifecycle_reason="direct_command_marked_done",
+        completion_signal="Direct command",
+        config=config,
+        client=fake,
+    )
+    due = update_task_due_date(
+        page_id="page-1",
+        due_date="2026-05-25",
+        lifecycle_reason="direct_command_due_date_updated",
+        config=config,
+        client=fake,
+    )
+
+    assert done["status"] == "updated"
+    assert due["status"] == "updated"
+    assert done["calendar_write_attempted"] is False
+    assert due["calendar_write_attempted"] is False
 
 
 def test_schema_ensure_live_returns_blocked_on_notion_error(tmp_path):

@@ -24,6 +24,8 @@ from assistant_scheduler_health import (
     TASK_SPINE_DIRECT_PROGRAM_ARGUMENTS,
     TASK_SPINE_SPEC,
     TASK_SPINE_SSH_BRIDGE_PROGRAM_ARGUMENTS,
+    TASK_COMMAND_CAPTURE_DIRECT_PROGRAM_ARGUMENTS,
+    TASK_COMMAND_CAPTURE_SPEC,
     TRAINING_CALENDAR_DIRECT_PROGRAM_ARGUMENTS,
     TRAINING_CALENDAR_BOOKING_SPEC,
     TRAINING_CALENDAR_SSH_BRIDGE_PROGRAM_ARGUMENTS,
@@ -198,6 +200,21 @@ def test_coding_work_briefing_launchagent_spec_matches_production_schedule():
     assert spec.launchagent.hour == 12
     assert spec.launchagent.minute == 5
     assert spec.state_path == "/Users/clawdbot/.openclaw/state/coding_work_briefing_scheduler.json"
+
+
+def test_task_command_capture_launchagent_spec_matches_production_interval():
+    spec = TASK_COMMAND_CAPTURE_SPEC
+
+    assert JOB_REGISTRY["task_command_capture"] is spec
+    assert spec.workflow == "task_command_capture_scheduler"
+    assert spec.launchagent.label == "com.openclaw.rocky-task-command-capture"
+    assert spec.launchagent.program_arguments == TASK_COMMAND_CAPTURE_DIRECT_PROGRAM_ARGUMENTS
+    assert launchagent_execution_mode(spec.launchagent.program_arguments) == "direct_launchd_python"
+    assert spec.launchagent.start_interval_seconds == 300
+    assert spec.launchagent.working_directory == "/Users/clawdbot/.openclaw/workspace"
+    assert spec.launchagent.stdout_path == "/Users/clawdbot/.openclaw/logs/rocky-task-command-capture.log"
+    assert spec.launchagent.stderr_path == "/Users/clawdbot/.openclaw/logs/rocky-task-command-capture.err.log"
+    assert spec.state_path == "/Users/clawdbot/.openclaw/state/task_command_capture_scheduler.json"
 
 
 def test_training_calendar_health_reports_ssh_bridge_mode(tmp_path):

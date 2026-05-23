@@ -16,6 +16,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from obsidian_memory import query_obsidian_vault
+from meeting_task_signal_reader import collect_meeting_task_signals
 
 
 BETTY_ROOT = Path("/Users/clawdbot/.openclaw/workspace-betty")
@@ -62,7 +63,13 @@ def collect_task_signals(
             errors.append({"source": "memory", "reason": "memory_signal_collection_failed", "error_hash": _hash_text(str(exc))})
     if "meetings" in selected:
         try:
-            signals.extend(collect_obsidian_task_signals(kind="meetings", results=meeting_results, limit=limit))
+            if meeting_results is None:
+                meeting_payload = collect_meeting_task_signals(since_days=since_days, limit=limit)
+                signals.extend(meeting_payload.get("signals") or [])
+                if meeting_payload.get("status") not in {"ok", "degraded"}:
+                    errors.append({"source": "meetings", "reason": meeting_payload.get("reason") or meeting_payload.get("status")})
+            else:
+                signals.extend(collect_obsidian_task_signals(kind="meetings", results=meeting_results, limit=limit))
         except Exception as exc:
             errors.append({"source": "meetings", "reason": "meeting_signal_collection_failed", "error_hash": _hash_text(str(exc))})
     return {

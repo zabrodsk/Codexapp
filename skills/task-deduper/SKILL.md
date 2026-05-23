@@ -21,3 +21,7 @@ Use this skill when Rocky needs to decide whether a detected task should create 
 ```bash
 /Users/clawdbot/.openclaw/workspace/.venv/bin/python scripts/rocky_runtime_tools.py task-detect --source email --limit 5 --json
 ```
+
+## Sprint 8 Contract Update
+
+Direct commands and meeting actions keep source refs plus action identity. A single meeting or email may produce multiple tasks; never collapse distinct actions solely because they share a source artifact.
