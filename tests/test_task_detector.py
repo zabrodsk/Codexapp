@@ -32,7 +32,8 @@ def test_heuristic_detector_auto_creates_high_confidence_email_task():
     assert task["auto_create_allowed"] is True
     assert task["status"] == "Open"
     assert task["priority"] == "High"
-    assert task["dedupe_key"].startswith("task-source:")
+    assert task["dedupe_key"].startswith("task-source")
+    assert task["action_fingerprint"].startswith("task-action:")
 
 
 def test_prompt_injection_signal_is_downgraded_and_not_auto_created():

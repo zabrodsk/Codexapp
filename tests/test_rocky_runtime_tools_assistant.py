@@ -30,6 +30,7 @@ from rocky_runtime_tools import (
     cmd_task_detector_llm_health,
     cmd_task_focus_book,
     cmd_task_focus_proposals,
+    cmd_task_lifecycle_run,
     cmd_task_reminders_run,
     cmd_task_spine_scheduler_run,
     cmd_training_calendar_proposals,
@@ -130,6 +131,7 @@ def test_parser_includes_assistant_commands():
     assert parser.parse_args(["task-detect"]).command == "task-detect"
     assert parser.parse_args(["task-detector-llm-health"]).command == "task-detector-llm-health"
     assert parser.parse_args(["task-reminders-run"]).command == "task-reminders-run"
+    assert parser.parse_args(["task-lifecycle-run"]).command == "task-lifecycle-run"
     assert parser.parse_args(["task-focus-proposals"]).command == "task-focus-proposals"
     assert parser.parse_args(["task-focus-book", "--idempotency-key", "rocky:task:test"]).command == "task-focus-book"
     assert parser.parse_args(["task-command-apply", "--text", "remember this"]).command == "task-command-apply"
@@ -709,6 +711,8 @@ def test_runtime_deployable_files_include_training_calendar_modules():
     assert "scripts/task_signal_collector.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/task_detector.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/task_deduper.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/task_identity_resolver.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/task_lifecycle_engine.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/task_reminder_engine.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/task_focus_proposal_engine.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/task_focus_live_booking.py" in RUNTIME_DEPLOYABLE_FILES
@@ -845,6 +849,27 @@ def test_task_reminders_cli_uses_reminder_engine(capsys):
     assert result == 0
     assert payload["status"] == "skipped_no_reminders"
     reminders.assert_called_once()
+
+
+def test_task_lifecycle_cli_uses_lifecycle_engine(capsys):
+    with patch(
+        "rocky_runtime_tools.run_task_lifecycle",
+        return_value={"status": "dry_run", "reason": "live_flag_not_supplied", "notion_write_attempted": False},
+    ) as lifecycle:
+        result = cmd_task_lifecycle_run(
+            _args(
+                today="2026-05-25",
+                live=False,
+                ledger_path=None,
+                write_audit=False,
+                json_output=True,
+            )
+        )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert payload["status"] == "dry_run"
+    lifecycle.assert_called_once()
 
 
 def test_task_focus_proposals_cli_uses_dry_run_engine(tmp_path, capsys):

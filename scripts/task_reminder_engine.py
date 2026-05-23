@@ -7,6 +7,7 @@ from typing import Any
 
 from assistant_notification_dispatcher import dispatch_failure_notification
 from notion_task_manager import list_open_tasks
+from task_lifecycle_engine import run_task_lifecycle
 
 
 def run_task_reminders(
@@ -18,6 +19,8 @@ def run_task_reminders(
     notification_channel_id: str | None = None,
     ledger_path: str | None = None,
     scheduler_db_path: str | None = None,
+    live: bool = False,
+    client: Any | None = None,
 ) -> dict[str, Any]:
     day = _parse_date(today) if today else date.today()
     if tasks is None:
@@ -36,6 +39,16 @@ def run_task_reminders(
         "calendar_write_attempted": False,
         "notion_write_attempted": False,
     }
+    if live and due:
+        payload["lifecycle"] = run_task_lifecycle(
+            today=day,
+            tasks=due,
+            live=True,
+            client=client,
+            ledger_path=ledger_path,
+            write_audit=True,
+        )
+        payload["notion_write_attempted"] = bool(payload["lifecycle"].get("notion_write_attempted"))
     if notify and due:
         payload["notification"] = dispatch_failure_notification(
             {

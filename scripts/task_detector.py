@@ -15,7 +15,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from assistant_codex_llm import AssistantCodexLLMError, generate_codex_text, hash_text as safe_error_hash
-from notion_task_manager import stable_task_dedupe_key, stable_task_id
+from notion_task_manager import stable_task_action_fingerprint, stable_task_dedupe_key, stable_task_id
 
 
 POLICY_VERSION = "rocky-task-detector-v1"
@@ -189,6 +189,7 @@ def _normalize_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
         "detection_reason": candidate.get("detection_reason") or "llm_task_candidate",
         "prompt_injection_flagged": prompt_injection,
     }
+    task["action_fingerprint"] = candidate.get("action_fingerprint") or stable_task_action_fingerprint(task)
     task["dedupe_key"] = candidate.get("dedupe_key") or stable_task_dedupe_key(task)
     task["rocky_task_id"] = candidate.get("rocky_task_id") or stable_task_id(task)
     task["auto_create_allowed"] = bool(

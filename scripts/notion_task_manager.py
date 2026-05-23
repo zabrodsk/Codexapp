@@ -21,6 +21,7 @@ DEFAULT_DATABASE_TITLE = "Rocky Personal Task Spine"
 NOTION_VERSION = "2022-06-28"
 POLICY_VERSION = "rocky-task-spine-v1"
 TASK_STATUSES = {"Candidate", "Open", "Scheduled", "Waiting", "Done", "Cancelled", "Archived"}
+TERMINAL_TASK_STATUSES = {"Done", "Cancelled", "Archived"}
 TASK_PRIORITIES = {"Low", "Normal", "High", "Urgent"}
 SENSITIVE_KEY_RE = re.compile(
     r"(auth|body|content|cookie|credential|html|password|raw|secret|token|transcript)",
@@ -28,7 +29,7 @@ SENSITIVE_KEY_RE = re.compile(
 )
 SENSITIVE_TEXT_RE = re.compile(
     r"(https?://[^\s]*(?:token|secret|password|credential|auth|cookie)[^\s]*|"
-    r"cookie|token|secret|password|credential|auth|Bearer\s+|\bsk-[A-Za-z0-9])",
+    r"(?:cookie|token|secret|password|credential)\s*[:=]|Bearer\s+|\bsk-[A-Za-z0-9])",
     re.IGNORECASE,
 )
 
@@ -206,6 +207,10 @@ def task_database_properties() -> dict[str, Any]:
         "Completion signal": {"rich_text": {}},
         "Cancelled/archived reason": {"rich_text": {}},
         "Dedupe key": {"rich_text": {}},
+        "Action fingerprint": {"rich_text": {}},
+        "Last detected date": {"date": {}},
+        "Detection count": {"number": {"format": "number"}},
+        "Last lifecycle reason": {"rich_text": {}},
         "Rocky task id": {"rich_text": {}},
     }
 
@@ -304,14 +309,16 @@ def upsert_task(
             "notion_write_attempted": False,
         }
     notion = client or NotionClient(config.token or "")
-    dedupe_key = str(task.get("dedupe_key") or stable_task_dedupe_key(task))
-    existing = _find_page_by_task_identity(
+    action_fingerprint = str(task.get("action_fingerprint") or stable_task_action_fingerprint(task))
+    dedupe_key = str(task.get("dedupe_key") or stable_task_dedupe_key({**task, "action_fingerprint": action_fingerprint}))
+    explicit_page_id = str(task.get("existing_page_id") or "").strip()
+    existing = {"id": explicit_page_id} if explicit_page_id else _find_page_by_task_identity(
         notion,
         config.database_id or "",
         dedupe_key=dedupe_key,
-        source_ref=str(task.get("source_ref") or ""),
+        action_fingerprint=action_fingerprint,
     )
-    properties = task_to_notion_properties({**task, "dedupe_key": dedupe_key})
+    properties = task_to_notion_properties({**task, "dedupe_key": dedupe_key, "action_fingerprint": action_fingerprint})
     if existing:
         updated = notion.update_page(existing["id"], properties=properties)
         return {
@@ -332,6 +339,25 @@ def upsert_task(
         "task": _safe_task_summary(task),
         "calendar_write_attempted": False,
         "notion_write_attempted": True,
+    }
+
+
+def list_tasks(
+    *,
+    config: NotionTaskConfig | None = None,
+    client: Any | None = None,
+    limit: int = 100,
+) -> dict[str, Any]:
+    config = config or load_notion_task_config()
+    if not config.token_configured or not config.database_configured:
+        return {"status": "blocked", "reason": "notion_task_database_not_configured", "tasks": []}
+    notion = client or NotionClient(config.token or "")
+    payload = notion.query_database(config.database_id or "", {"page_size": max(1, min(int(limit), 100))})
+    return {
+        "status": "ok",
+        "tasks": [notion_page_to_task(item) for item in payload.get("results") or []],
+        "calendar_write_attempted": False,
+        "notion_write_attempted": False,
     }
 
 
@@ -389,6 +415,36 @@ def mark_task_calendar_status(
     return {"status": "updated", "page_id": updated.get("id") or page_id, "notion_write_attempted": True}
 
 
+def update_task_reminder_metadata(
+    *,
+    page_id: str,
+    last_reminded_date: str,
+    next_reminder_date: str,
+    reminder_count: int,
+    lifecycle_reason: str = "reminder_sent",
+    config: NotionTaskConfig | None = None,
+    client: Any | None = None,
+) -> dict[str, Any]:
+    config = config or load_notion_task_config()
+    if not config.token_configured:
+        return {"status": "blocked", "reason": "notion_token_missing", "notion_write_attempted": False}
+    notion = client or NotionClient(config.token or "")
+    props = {
+        "Last reminded date": _date_prop(last_reminded_date),
+        "Next reminder date": _date_prop(next_reminder_date),
+        "Reminder count": {"number": int(reminder_count)},
+        "Last lifecycle reason": _rich_text_prop(lifecycle_reason),
+        "Updated date": _date_prop(date.today().isoformat()),
+    }
+    updated = notion.update_page(page_id, properties=props)
+    return {
+        "status": "updated",
+        "reason": lifecycle_reason,
+        "page_id": updated.get("id") or page_id,
+        "notion_write_attempted": True,
+    }
+
+
 def task_to_notion_properties(task: dict[str, Any]) -> dict[str, Any]:
     due_date = task.get("due_date")
     today = date.today().isoformat()
@@ -413,6 +469,10 @@ def task_to_notion_properties(task: dict[str, Any]) -> dict[str, Any]:
         "Reminder count": {"number": int(task.get("reminder_count") or 0)},
         "Calendar block status": _select_prop(_safe_calendar_status(task.get("calendar_block_status"))),
         "Calendar idempotency key": _rich_text_prop(_safe_text(task.get("calendar_idempotency_key"), 240)),
+        "Action fingerprint": _rich_text_prop(_safe_text(task.get("action_fingerprint") or stable_task_action_fingerprint(task), 160)),
+        "Last detected date": _date_prop(task.get("last_detected_date") or today),
+        "Detection count": {"number": int(task.get("detection_count") or 1)},
+        "Last lifecycle reason": _rich_text_prop(_safe_text(task.get("last_lifecycle_reason"), 240)),
         "Related project": _rich_text_prop(_safe_text(task.get("related_project"), 240)),
         "Related person/company": _rich_text_prop(_safe_text(task.get("related_person_company"), 240)),
         "Completion signal": _rich_text_prop(_safe_text(task.get("completion_signal"), 500)),
@@ -444,6 +504,10 @@ def notion_page_to_task(page: dict[str, Any]) -> dict[str, Any]:
         "reminder_count": int(_plain_number(props.get("Reminder count")) or 0),
         "calendar_block_status": _plain_select(props.get("Calendar block status")) or "None",
         "calendar_idempotency_key": _plain_rich_text(props.get("Calendar idempotency key")),
+        "action_fingerprint": _plain_rich_text(props.get("Action fingerprint")),
+        "last_detected_date": _plain_date(props.get("Last detected date")),
+        "detection_count": int(_plain_number(props.get("Detection count")) or 0),
+        "last_lifecycle_reason": _plain_rich_text(props.get("Last lifecycle reason")),
         "related_project": _plain_rich_text(props.get("Related project")),
         "related_person_company": _plain_rich_text(props.get("Related person/company")),
         "dedupe_key": _plain_rich_text(props.get("Dedupe key")),
@@ -451,21 +515,35 @@ def notion_page_to_task(page: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def stable_task_dedupe_key(task: dict[str, Any]) -> str:
-    source_ref = str(task.get("source_ref") or "").strip()
-    if source_ref:
-        return f"task-source:{_hash_json({'source_ref': source_ref, 'owner': _normalize_text(task.get('owner') or 'Dusan')})}"
+def stable_task_action_fingerprint(task: dict[str, Any]) -> str:
     payload = {
         "title": _normalize_text(task.get("title")),
         "owner": _normalize_text(task.get("owner") or "Dusan"),
+        "source": _normalize_text(task.get("source")),
         "related_project": _normalize_text(task.get("related_project")),
         "related_person_company": _normalize_text(task.get("related_person_company")),
+        "due_date": str(task.get("due_date") or ""),
     }
-    return f"task:{_hash_json(payload)}"
+    return f"task-action:{_hash_json(payload)}"
+
+
+def legacy_source_dedupe_key(task: dict[str, Any]) -> str:
+    source_ref = str(task.get("source_ref") or "").strip()
+    if not source_ref:
+        return ""
+    return f"task-source:{_hash_json({'source_ref': source_ref, 'owner': _normalize_text(task.get('owner') or 'Dusan')})}"
+
+
+def stable_task_dedupe_key(task: dict[str, Any]) -> str:
+    action_fingerprint = str(task.get("action_fingerprint") or stable_task_action_fingerprint(task))
+    source_ref = str(task.get("source_ref") or "").strip()
+    if source_ref:
+        return f"task-source-action:{_hash_json({'source_ref': source_ref, 'action_fingerprint': action_fingerprint, 'owner': _normalize_text(task.get('owner') or 'Dusan')})}"
+    return f"task-action-key:{_hash_json({'action_fingerprint': action_fingerprint, 'owner': _normalize_text(task.get('owner') or 'Dusan')})}"
 
 
 def stable_task_id(task: dict[str, Any]) -> str:
-    return f"rocky-task:{_hash_json({'dedupe_key': task.get('dedupe_key') or stable_task_dedupe_key(task), 'source_ref': task.get('source_ref')})}"
+    return f"rocky-task:{_hash_json({'dedupe_key': task.get('dedupe_key') or stable_task_dedupe_key(task), 'action_fingerprint': task.get('action_fingerprint') or stable_task_action_fingerprint(task)})}"
 
 
 def _find_page_by_task_identity(
@@ -473,7 +551,7 @@ def _find_page_by_task_identity(
     database_id: str,
     *,
     dedupe_key: str,
-    source_ref: str = "",
+    action_fingerprint: str = "",
 ) -> dict[str, Any] | None:
     payload = notion.query_database(
         database_id,
@@ -482,10 +560,10 @@ def _find_page_by_task_identity(
     results = payload.get("results") or []
     if results:
         return results[0]
-    if source_ref:
+    if action_fingerprint:
         payload = notion.query_database(
             database_id,
-            {"filter": {"property": "Source ref", "rich_text": {"equals": source_ref}}, "page_size": 1},
+            {"filter": {"property": "Action fingerprint", "rich_text": {"equals": action_fingerprint}}, "page_size": 1},
         )
         results = payload.get("results") or []
         if results:

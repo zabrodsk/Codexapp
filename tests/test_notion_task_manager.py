@@ -148,17 +148,19 @@ def test_upsert_task_creates_and_updates_by_dedupe_key(tmp_path):
     assert "investor" in json.dumps(first)
 
 
-def test_stable_dedupe_prefers_source_ref(tmp_path):
-    from notion_task_manager import stable_task_dedupe_key
+def test_stable_dedupe_uses_source_ref_and_action_fingerprint(tmp_path):
+    from notion_task_manager import legacy_source_dedupe_key, stable_task_dedupe_key
 
     first = stable_task_dedupe_key({"title": "A changing summary", "source_ref": "apple-mail:message:abc"})
     second = stable_task_dedupe_key({"title": "A different generated title", "source_ref": "apple-mail:message:abc"})
+    legacy = legacy_source_dedupe_key({"title": "Anything", "source_ref": "apple-mail:message:abc"})
 
-    assert first == second
-    assert first.startswith("task-source:")
+    assert first != second
+    assert first.startswith("task-source-action:")
+    assert legacy.startswith("task-source:")
 
 
-def test_upsert_task_falls_back_to_source_ref_when_dedupe_changed(tmp_path):
+def test_upsert_task_does_not_blindly_fall_back_to_source_ref(tmp_path):
     fake = FakeNotion()
     config = NotionTaskConfig(
         token="secret-token",
@@ -190,11 +192,8 @@ def test_upsert_task_falls_back_to_source_ref_when_dedupe_changed(tmp_path):
         client=fake,
     )
 
-    assert payload["status"] == "updated"
-    assert fake.updated_pages[0]["id"] == "legacy-page"
-    updated_json = json.dumps(fake.updated_pages[0])
-    assert "task-source:" in updated_json
-    assert "task:old-title-key" not in updated_json
+    assert payload["status"] == "created"
+    assert fake.updated_pages == []
 
 
 def test_schema_ensure_live_returns_blocked_on_notion_error(tmp_path):

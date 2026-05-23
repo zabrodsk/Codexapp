@@ -106,6 +106,8 @@ from notion_task_manager import (
     upsert_task,
 )
 from task_deduper import dedupe_task_candidates
+from task_identity_resolver import resolve_task_identities
+from task_lifecycle_engine import run_task_lifecycle
 from task_detector import detect_task_candidates
 from task_focus_live_booking import book_task_focus_proposal
 from task_focus_proposal_engine import build_task_focus_proposals
@@ -153,14 +155,18 @@ RUNTIME_DEPLOYABLE_FILES = (
     "scripts/task_deduper.py",
     "scripts/task_detector.py",
     "scripts/task_focus_live_booking.py",
+    "scripts/task_identity_resolver.py",
+    "scripts/task_lifecycle_engine.py",
     "scripts/task_focus_proposal_engine.py",
     "scripts/task_reminder_engine.py",
     "scripts/task_signal_collector.py",
     "scripts/task_spine_scheduler.py",
     "skills/notion-task-manager/SKILL.md",
     "skills/task-command-capture/SKILL.md",
+    "skills/task-deduper/SKILL.md",
     "skills/task-detector/SKILL.md",
     "skills/task-focus-calendar/SKILL.md",
+    "skills/task-lifecycle-engine/SKILL.md",
     "skills/task-reminder-engine/SKILL.md",
     "scripts/training_calendar_live_booking.py",
     "scripts/training_calendar_proposal_engine.py",
@@ -818,11 +824,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     task_reminders.add_argument("--today", dest="today")
     task_reminders.add_argument("--notify", action="store_true")
+    task_reminders.add_argument("--live", action="store_true")
     task_reminders.add_argument("--notification-dry-run", action="store_true", dest="notification_dry_run")
     task_reminders.add_argument("--notification-channel-id", dest="notification_channel_id")
     task_reminders.add_argument("--ledger-path", dest="ledger_path")
     task_reminders.add_argument("--scheduler-db", dest="scheduler_db")
     task_reminders.add_argument("--json", action="store_true", dest="json_output")
+
+
+    task_lifecycle = sub.add_parser(
+        "task-lifecycle-run",
+        help="Run Rocky task lifecycle/reminder metadata updates.",
+    )
+    task_lifecycle.add_argument("--today", dest="today")
+    task_lifecycle.add_argument("--live", action="store_true")
+    task_lifecycle.add_argument("--ledger-path", dest="ledger_path")
+    task_lifecycle.add_argument(
+        "--no-write-audit",
+        action="store_false",
+        dest="write_audit",
+        default=True,
+        help="Do not append assistant audit events.",
+    )
+    task_lifecycle.add_argument("--json", action="store_true", dest="json_output")
 
     task_focus = sub.add_parser(
         "task-focus-proposals",
@@ -2712,11 +2736,13 @@ def cmd_task_detect(args) -> int:
     signals = collect_task_signals(sources=args.sources, since_days=args.since_days, limit=args.limit)
     detected = detect_task_candidates(signals.get("signals") or [], use_llm=not args.no_llm, max_candidates=args.limit)
     deduped = dedupe_task_candidates(detected.get("candidates") or [])
+    identities = resolve_task_identities(deduped.get("candidates") or [], existing_tasks=[])
     payload = {
         "status": "ok" if signals.get("status") == "ok" and detected.get("status") == "ok" else "degraded",
         "signals": {"status": signals.get("status"), "signal_count": signals.get("signal_count"), "errors": signals.get("errors")},
         "detected": detected,
         "deduped": deduped,
+        "identity": identities,
         "calendar_write_attempted": False,
         "notion_write_attempted": False,
     }
@@ -2744,12 +2770,28 @@ def cmd_task_reminders_run(args) -> int:
         notification_channel_id=args.notification_channel_id,
         ledger_path=args.ledger_path,
         scheduler_db_path=args.scheduler_db,
+        live=getattr(args, "live", False),
     )
     if args.json_output:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
     else:
         print(f"Task reminders: {payload.get('status')} count={payload.get('reminder_count', 0)}")
     return 0 if payload.get("status") in {"ok", "skipped_no_reminders"} else 1
+
+
+
+def cmd_task_lifecycle_run(args) -> int:
+    payload = run_task_lifecycle(
+        today=args.today,
+        live=args.live,
+        ledger_path=args.ledger_path,
+        write_audit=args.write_audit,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Task lifecycle: {payload.get('status')} ({payload.get('reason')})")
+    return 0 if payload.get("status") in {"updated", "dry_run", "skipped_no_due_tasks"} else 1
 
 
 def cmd_task_focus_proposals(args) -> int:
@@ -3100,6 +3142,7 @@ def main() -> int:
         "task-detect": cmd_task_detect,
         "task-detector-llm-health": cmd_task_detector_llm_health,
         "task-reminders-run": cmd_task_reminders_run,
+        "task-lifecycle-run": cmd_task_lifecycle_run,
         "task-focus-proposals": cmd_task_focus_proposals,
         "task-focus-book": cmd_task_focus_book,
         "task-command-apply": cmd_task_command_apply,

@@ -20,11 +20,12 @@ from assistant_audit_log import AssistantAuditLog
 from assistant_notification_dispatcher import dispatch_failure_notification
 from assistant_run_lock import acquire_run_lock, release_run_lock
 from assistant_scheduler_state import AssistantSchedulerState, utc_now_iso
-from notion_task_manager import ensure_task_database_schema, load_notion_task_config, notion_task_health, upsert_task
+from notion_task_manager import ensure_task_database_schema, list_tasks, load_notion_task_config, notion_task_health, upsert_task
 from task_deduper import dedupe_task_candidates
 from task_detector import detect_task_candidates
 from task_focus_live_booking import book_task_focus_proposal
 from task_focus_proposal_engine import build_task_focus_proposals
+from task_identity_resolver import resolve_task_identities
 from task_reminder_engine import run_task_reminders
 from task_signal_collector import collect_task_signals
 
@@ -188,14 +189,29 @@ def _run_inner(
     )
     detected = detect_task_candidates(signals.get("signals") or [], use_llm=True, llm_func=llm_func, max_candidates=limit)
     deduped = dedupe_task_candidates(detected.get("candidates") or [])
+    existing_payload = list_tasks(config=config, client=notion_client, limit=100) if live else {"status": "ok", "tasks": []}
+    identities = resolve_task_identities(
+        deduped.get("candidates") or [],
+        existing_tasks=existing_payload.get("tasks") or [],
+        today=planning_day,
+    )
     upserts = []
     created_tasks = []
     candidate_tasks = []
-    for task in deduped.get("candidates") or []:
+    identity_results = identities.get("results") or []
+    for item in identity_results:
+        task = item.get("task") or {}
+        action = item.get("action")
+        if action in {"terminal_match_skipped", "duplicate"}:
+            continue
+        if action == "manual_review_required":
+            candidate_tasks.append({**task, "status": "Candidate"})
+            continue
         if task.get("auto_create_allowed"):
             result = upsert_task(task, live=live, config=config, client=notion_client)
             upserts.append(result)
-            created_tasks.append({**task, "page_id": result.get("page_id")})
+            if result.get("status") in {"created", "updated", "dry_run"}:
+                created_tasks.append({**task, "page_id": result.get("page_id") or task.get("page_id")})
         elif float(task.get("confidence") or 0) >= 0.6 and not task.get("prompt_injection_flagged"):
             candidate_tasks.append({**task, "status": "Candidate"})
     reminders = run_task_reminders(
@@ -206,6 +222,8 @@ def _run_inner(
         notification_channel_id=notification_channel_id,
         ledger_path=str(ledger_path) if ledger_path else None,
         scheduler_db_path=str(scheduler_db_path) if scheduler_db_path else None,
+        live=live,
+        client=notion_client,
     )
     focus = build_task_focus_proposals(
         planning_date=planning_day,
@@ -244,6 +262,7 @@ def _run_inner(
             "candidate_count": detected.get("candidate_count", 0),
             "llm": _safe_llm_summary(detected),
             "deduped_count": deduped.get("candidate_count", 0),
+            "identity": _safe_identity_summary(identities),
             "notion_upsert_count": len(upserts),
             "auto_created_count": len(created_tasks),
             "review_candidate_count": len(candidate_tasks),
@@ -378,6 +397,7 @@ def _write_state_file(path: Path, payload: dict[str, Any]) -> None:
         "candidate_count": payload.get("candidate_count", 0),
         "llm": payload.get("llm") or {},
         "notion_upsert_count": payload.get("notion_upsert_count", 0),
+        "identity": payload.get("identity") or {},
         "calendar_write_attempted": payload.get("calendar_write_attempted", False),
         "calendar_event_created": payload.get("calendar_event_created", False),
         "error_hash": payload.get("error_hash"),
@@ -405,6 +425,19 @@ def _redact_payload(value: Any) -> Any:
     if isinstance(value, str) and UNSAFE_TEXT_RE.search(value):
         return {"redacted": True, "sha256": _hash_text(value), "chars": len(value)}
     return value
+
+
+def _safe_identity_summary(identities: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": identities.get("status"),
+        "resolved_count": identities.get("resolved_count", 0),
+        "create_count": identities.get("create_count", 0),
+        "update_count": identities.get("update_count", 0),
+        "duplicate_count": identities.get("duplicate_count", 0),
+        "terminal_skipped_count": identities.get("terminal_skipped_count", 0),
+        "manual_review_count": identities.get("manual_review_count", 0),
+        "migrated_count": identities.get("migrated_count", 0),
+    }
 
 
 def _safe_llm_summary(detected: dict[str, Any]) -> dict[str, Any]:
