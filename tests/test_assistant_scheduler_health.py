@@ -14,6 +14,9 @@ if str(SCRIPTS) not in sys.path:
 
 from assistant_launchd import LaunchAgentSpec
 from assistant_scheduler_health import (
+    EMAIL_TRIAGE_BOOKING_SPEC,
+    EMAIL_TRIAGE_DIRECT_PROGRAM_ARGUMENTS,
+    EMAIL_TRIAGE_SSH_BRIDGE_PROGRAM_ARGUMENTS,
     JOB_REGISTRY,
     TRAINING_CALENDAR_DIRECT_PROGRAM_ARGUMENTS,
     TRAINING_CALENDAR_BOOKING_SPEC,
@@ -253,3 +256,64 @@ def test_training_calendar_health_blocks_when_ssh_bridge_unavailable(tmp_path):
 
     assert payload["status"] == "blocked"
     assert payload["failure_class"] == "localhost_ssh_unavailable"
+
+
+def test_email_triage_booking_launchagent_spec_matches_production_schedule():
+    spec = EMAIL_TRIAGE_BOOKING_SPEC
+
+    assert JOB_REGISTRY["email_triage_booking"] is spec
+    assert spec.workflow == "email_triage_scheduler"
+    assert spec.launchagent.label == "com.openclaw.rocky-email-triage-booking"
+    assert spec.launchagent.program_arguments == EMAIL_TRIAGE_SSH_BRIDGE_PROGRAM_ARGUMENTS
+    assert "--notify-failures" in " ".join(spec.launchagent.program_arguments)
+    assert launchagent_execution_mode(spec.launchagent.program_arguments) == "localhost_ssh_bridge"
+    assert launchagent_execution_mode(EMAIL_TRIAGE_DIRECT_PROGRAM_ARGUMENTS) == "direct_launchd_python"
+    assert spec.launchagent.working_directory == "/Users/clawdbot/.openclaw/workspace"
+    assert spec.launchagent.stdout_path == "/Users/clawdbot/.openclaw/logs/rocky-email-triage-booking.log"
+    assert spec.launchagent.stderr_path == "/Users/clawdbot/.openclaw/logs/rocky-email-triage-booking.err.log"
+    assert spec.launchagent.weekdays == [1, 2, 3, 4]
+    assert spec.launchagent.hour == 9
+    assert spec.launchagent.minute == 30
+    assert spec.state_path == "/Users/clawdbot/.openclaw/state/email_triage_scheduler.json"
+
+
+def test_email_triage_health_reports_ssh_bridge_mode(tmp_path):
+    base = _spec(tmp_path)
+    spec = SchedulerJobSpec(
+        job_name="email_triage_booking",
+        job_label="Rocky email triage booking",
+        workflow="email_triage_scheduler",
+        launchagent=type(base.launchagent)(
+            label=base.launchagent.label,
+            plist_path=base.launchagent.plist_path,
+            program_arguments=EMAIL_TRIAGE_SSH_BRIDGE_PROGRAM_ARGUMENTS,
+            working_directory=base.launchagent.working_directory,
+            stdout_path=base.launchagent.stdout_path,
+            stderr_path=base.launchagent.stderr_path,
+            weekdays=[1, 2, 3, 4],
+            hour=9,
+            minute=30,
+            timezone=base.launchagent.timezone,
+            first_expected_run_after=base.launchagent.first_expected_run_after,
+        ),
+        state_path=str(tmp_path / "state.json"),
+    )
+    plist = plistlib.loads(Path(spec.launchagent.plist_path).read_bytes())
+    plist["ProgramArguments"] = EMAIL_TRIAGE_SSH_BRIDGE_PROGRAM_ARGUMENTS
+    plist["StartCalendarInterval"] = [
+        {"Weekday": day, "Hour": 9, "Minute": 30}
+        for day in [1, 2, 3, 4]
+    ]
+    Path(spec.launchagent.plist_path).write_bytes(plistlib.dumps(plist))
+
+    with patch("assistant_scheduler_health._localhost_ssh_status", return_value={"status": "ok"}):
+        payload = evaluate_scheduler_job(
+            spec,
+            now=datetime(2026, 5, 22, 12, 0, tzinfo=ZoneInfo("Europe/Prague")),
+            write_state=False,
+            write_audit=False,
+            launchctl_text="state = not running\nruns = 0\nlast exit code = (never exited)\n",
+        )
+
+    assert payload["status"] == "healthy"
+    assert payload["execution_mode"] == "localhost_ssh_bridge"

@@ -21,6 +21,9 @@ from rocky_runtime_tools import (
     cmd_calendar_policy_check,
     cmd_calendar_tcc_probe,
     cmd_calendar_write_health,
+    cmd_email_triage_book,
+    cmd_email_triage_proposals,
+    cmd_email_triage_scheduler_run,
     cmd_training_calendar_proposals,
     cmd_training_calendar_book,
     cmd_training_calendar_reconcile,
@@ -109,6 +112,11 @@ def test_parser_includes_assistant_commands():
     ).command == "training-calendar-book"
     assert parser.parse_args(["training-calendar-scheduler-run"]).command == "training-calendar-scheduler-run"
     assert parser.parse_args(["training-calendar-reconcile"]).command == "training-calendar-reconcile"
+    assert parser.parse_args(["email-triage-proposals"]).command == "email-triage-proposals"
+    assert parser.parse_args(
+        ["email-triage-book", "--idempotency-key", "rocky:email:test"]
+    ).command == "email-triage-book"
+    assert parser.parse_args(["email-triage-scheduler-run"]).command == "email-triage-scheduler-run"
     assert parser.parse_args(
         ["assistant-notification-dispatch", "--status", "blocked", "--reason", "test", "--dry-run"]
     ).command == "assistant-notification-dispatch"
@@ -530,6 +538,111 @@ def test_training_calendar_scheduler_json_uses_scheduler_engine(tmp_path, capsys
     assert scheduler.call_args.kwargs["notify_failures"] is True
 
 
+def test_email_triage_proposals_json_uses_dry_run_engine(tmp_path, capsys):
+    with patch(
+        "rocky_runtime_tools.build_email_triage_proposals",
+        return_value={
+            "status": "blocked",
+            "reason": "proactive_booking_blocked_on_friday_saturday_sunday",
+            "target_date": "2026-05-23",
+            "calendar_write_attempted": False,
+            "proposals": [],
+        },
+    ) as proposals:
+        result = cmd_email_triage_proposals(
+            _args(
+                planning_date="2026-05-23",
+                hours=168,
+                limit=100,
+                db_path=None,
+                ledger_path=str(tmp_path / "assistant_audit.jsonl"),
+                write_audit=False,
+                json_output=True,
+            )
+        )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 1
+    assert payload["calendar_write_attempted"] is False
+    proposals.assert_called_once()
+    assert proposals.call_args.kwargs["write_audit"] is False
+
+
+def test_email_triage_book_json_uses_live_booking_engine(tmp_path, capsys):
+    with patch(
+        "rocky_runtime_tools.book_email_triage_proposal",
+        return_value={
+            "status": "created",
+            "reason": None,
+            "idempotency_key": "rocky:email:2026-05-25:test",
+            "calendar_write_attempted": True,
+            "calendar_event_created": True,
+            "calendar_event_deleted": False,
+        },
+    ) as book:
+        result = cmd_email_triage_book(
+            _args(
+                idempotency_key="rocky:email:2026-05-25:test",
+                planning_date="2026-05-25",
+                calendar_name="Calendar",
+                live=True,
+                hours=168,
+                limit=100,
+                db_path=None,
+                state_db=None,
+                scheduler_db=None,
+                ledger_path=str(tmp_path / "assistant_audit.jsonl"),
+                json_output=True,
+            )
+        )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert payload["calendar_write_attempted"] is True
+    book.assert_called_once()
+    assert book.call_args.kwargs["idempotency_key"] == "rocky:email:2026-05-25:test"
+    assert book.call_args.kwargs["live"] is True
+
+
+def test_email_triage_scheduler_json_uses_scheduler_engine(tmp_path, capsys):
+    with patch(
+        "rocky_runtime_tools.run_email_triage_scheduler",
+        return_value={
+            "status": "skipped_weekend_target",
+            "reason": "proactive_booking_blocked_on_friday_saturday_sunday",
+            "target_date": "2026-05-23",
+            "calendar_write_attempted": False,
+        },
+    ) as scheduler:
+        result = cmd_email_triage_scheduler_run(
+            _args(
+                planning_date="2026-05-23",
+                calendar_name="Calendar",
+                live=True,
+                notify_failures=True,
+                notification_dry_run=True,
+                notification_channel_id="channel",
+                hours=168,
+                limit=100,
+                db_path=None,
+                calendar_state_db=None,
+                scheduler_db=str(tmp_path / "assistant_scheduler.sqlite3"),
+                ledger_path=str(tmp_path / "assistant_audit.jsonl"),
+                state_file=str(tmp_path / "email_triage_scheduler.json"),
+                lock_ttl_seconds=1800,
+                write_audit=True,
+                json_output=True,
+            )
+        )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert payload["status"] == "skipped_weekend_target"
+    scheduler.assert_called_once()
+    assert scheduler.call_args.kwargs["live"] is True
+    assert scheduler.call_args.kwargs["notify_failures"] is True
+
+
 def test_calendar_tcc_probe_json_uses_probe_engine(capsys):
     with patch(
         "rocky_runtime_tools.build_calendar_tcc_probe",
@@ -562,6 +675,9 @@ def test_runtime_deployable_files_include_training_calendar_modules():
     assert "scripts/training_calendar_reconciler.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/assistant_notification_dispatcher.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/assistant_calendar_tcc_probe.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/email_triage_proposal_engine.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/email_triage_live_booking.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/email_triage_scheduler.py" in RUNTIME_DEPLOYABLE_FILES
 
 
 def test_training_calendar_reconcile_cli_uses_reconcile_path(tmp_path, capsys):

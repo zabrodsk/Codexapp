@@ -123,13 +123,23 @@ def build_metadata_description(
     audit_id: str,
     idempotency_key: str,
     created_at: str,
+    metadata_extra: dict[str, Any] | None = None,
 ) -> str:
     safe_sources = ", ".join(str(item) for item in sources) if sources else "none"
-    return "\n".join(
+    lines = [
+        "Booked by: Rocky",
+        f"Block type: {kind}",
+        f"Reason: {reason}",
+    ]
+    for key, value in (metadata_extra or {}).items():
+        label = " ".join(str(key).replace("_", " ").split()).title()
+        if isinstance(value, (dict, list, tuple)):
+            rendered = str(value)
+        else:
+            rendered = str(value)
+        lines.append(f"{label}: {rendered}")
+    lines.extend(
         [
-            "Booked by: Rocky",
-            f"Block type: {kind}",
-            f"Reason: {reason}",
             f"Sources: {safe_sources}",
             f"Confidence: {confidence}",
             f"Audit ID: {audit_id}",
@@ -138,6 +148,7 @@ def build_metadata_description(
             "Reversal instruction: Delete this Rocky-owned calendar block if it is no longer useful.",
         ]
     )
+    return "\n".join(lines)
 
 
 def build_calendar_dry_run(
@@ -151,6 +162,7 @@ def build_calendar_dry_run(
     reason: str = "Rocky dry-run calendar proposal",
     source_refs: list[Any] | None = None,
     confidence: str = "medium",
+    metadata_extra: dict[str, Any] | None = None,
     db_path: Path | str | None = None,
     existing_events: list[dict[str, Any]] | None = None,
     ledger_path: Path | str | None = None,
@@ -413,6 +425,7 @@ def build_calendar_dry_run(
             audit_id=audit_id or "dry-run-not-recorded",
             idempotency_key=chosen_key,
             created_at=created_at,
+            metadata_extra=metadata_extra,
         ),
         "policy_decision": final_policy.to_dict(),
         "existing_event_count": len(existing_events),

@@ -11,6 +11,7 @@ if str(SCRIPTS) not in sys.path:
 from assistant_notification_dispatcher import (
     DEFAULT_ALERT_CHANNEL_ID,
     dispatch_failure_notification,
+    render_notification,
     should_notify,
 )
 from assistant_scheduler_state import AssistantSchedulerState
@@ -87,3 +88,12 @@ def test_notification_failure_creates_dead_letter(tmp_path):
     dead = AssistantSchedulerState(tmp_path / "assistant_scheduler.sqlite3").list_dead_letters()
     assert dead[-1]["failure_class"] == "assistant_notification_failed"
     assert "super-secret-token" not in json.dumps(dead)
+
+
+def test_notification_title_uses_workflow_not_training_specific_text():
+    message = render_notification(
+        {"workflow": "email_triage_scheduler", "status": "blocked", "reason": "calendar_write_health_not_ok"}
+    )
+
+    assert message.splitlines()[0] == "Rocky email triage scheduler needs attention"
+    assert "training calendar" not in message

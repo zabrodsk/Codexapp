@@ -126,6 +126,10 @@ def evaluate_calendar_policy(
         reasons.append("proactive_booking_not_monday_through_thursday")
     if duration_minutes <= 0:
         reasons.append("duration_must_be_positive")
+    if kind == "email_triage" and duration_minutes < 30:
+        reasons.append("email_triage_minimum_duration_is_30_minutes")
+    if kind == "email_triage" and parsed_start < time(12, 0):
+        reasons.append("email_triage_must_start_no_earlier_than_noon")
     if kind == "coding_focus" and duration_minutes < 60:
         reasons.append("coding_focus_minimum_duration_is_60_minutes")
     if kind == "coding_focus" and end_dt.time() > time(19, 30):

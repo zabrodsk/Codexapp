@@ -95,6 +95,9 @@ from assistant_notification_dispatcher import dispatch_failure_notification
 from assistant_run_lock import smoke_lock_cycle
 from assistant_scheduler_health import evaluate_all_scheduler_jobs, format_scheduler_health_report
 from assistant_scheduler_state import AssistantSchedulerState
+from email_triage_live_booking import book_email_triage_proposal
+from email_triage_proposal_engine import build_email_triage_proposals
+from email_triage_scheduler import run_email_triage_scheduler
 from training_calendar_live_booking import book_training_calendar_proposal
 from training_calendar_proposal_engine import build_training_calendar_proposals
 from training_calendar_reconciler import reconcile_training_calendar
@@ -126,6 +129,11 @@ RUNTIME_DEPLOYABLE_FILES = (
     "scripts/assistant_scheduler_health.py",
     "scripts/assistant_scheduler_health_launcher.py",
     "scripts/assistant_scheduler_state.py",
+    "scripts/email_triage_live_booking.py",
+    "scripts/email_triage_proposal_engine.py",
+    "scripts/email_triage_reader.py",
+    "scripts/email_triage_scheduler.py",
+    "scripts/email_triage_time_estimator.py",
     "scripts/training_calendar_live_booking.py",
     "scripts/training_calendar_proposal_engine.py",
     "scripts/training_calendar_reconciler.py",
@@ -674,6 +682,71 @@ def build_parser() -> argparse.ArgumentParser:
     training_reconcile.add_argument("--notification-dry-run", action="store_true", dest="notification_dry_run")
     training_reconcile.add_argument("--notification-channel-id", dest="notification_channel_id")
     training_reconcile.add_argument("--json", action="store_true", dest="json_output")
+
+    email_proposals = sub.add_parser(
+        "email-triage-proposals",
+        help="Build dry-run same-day unread-email triage calendar proposals.",
+    )
+    email_proposals.add_argument("--planning-date", dest="planning_date")
+    email_proposals.add_argument("--hours", type=int, default=168)
+    email_proposals.add_argument("--limit", type=int, default=100)
+    email_proposals.add_argument("--db-path", dest="db_path")
+    email_proposals.add_argument("--ledger-path", dest="ledger_path")
+    email_proposals.add_argument(
+        "--no-write-audit",
+        action="store_false",
+        dest="write_audit",
+        default=True,
+        help="Do not append assistant audit events.",
+    )
+    email_proposals.add_argument("--json", action="store_true", dest="json_output")
+
+    email_book = sub.add_parser(
+        "email-triage-book",
+        help="Supervised live booking for one selected unread-email triage proposal.",
+    )
+    email_book.add_argument("--idempotency-key", required=True, dest="idempotency_key")
+    email_book.add_argument("--planning-date", dest="planning_date")
+    email_book.add_argument("--calendar", default="Calendar", dest="calendar_name")
+    email_book.add_argument("--hours", type=int, default=168)
+    email_book.add_argument("--limit", type=int, default=100)
+    email_book.add_argument("--db-path", dest="db_path")
+    email_book.add_argument("--state-db", dest="state_db")
+    email_book.add_argument("--scheduler-db", dest="scheduler_db")
+    email_book.add_argument("--ledger-path", dest="ledger_path")
+    email_book.add_argument("--live", action="store_true")
+    email_book.add_argument("--json", action="store_true", dest="json_output")
+
+    email_scheduler = sub.add_parser(
+        "email-triage-scheduler-run",
+        help="Run automatic unread-email triage calendar booking scheduler.",
+    )
+    email_scheduler.add_argument("--planning-date", dest="planning_date")
+    email_scheduler.add_argument("--calendar", default="Calendar", dest="calendar_name")
+    email_scheduler.add_argument("--hours", type=int, default=168)
+    email_scheduler.add_argument("--limit", type=int, default=100)
+    email_scheduler.add_argument("--db-path", dest="db_path")
+    email_scheduler.add_argument("--calendar-state-db", dest="calendar_state_db")
+    email_scheduler.add_argument("--scheduler-db", dest="scheduler_db")
+    email_scheduler.add_argument("--ledger-path", dest="ledger_path")
+    email_scheduler.add_argument(
+        "--state-file",
+        default="/Users/clawdbot/.openclaw/state/email_triage_scheduler.json",
+        dest="state_file",
+    )
+    email_scheduler.add_argument("--lock-ttl-seconds", type=int, default=1800, dest="lock_ttl_seconds")
+    email_scheduler.add_argument("--live", action="store_true")
+    email_scheduler.add_argument("--notify-failures", action="store_true", dest="notify_failures")
+    email_scheduler.add_argument("--notification-dry-run", action="store_true", dest="notification_dry_run")
+    email_scheduler.add_argument("--notification-channel-id", dest="notification_channel_id")
+    email_scheduler.add_argument(
+        "--no-write-audit",
+        action="store_false",
+        dest="write_audit",
+        default=True,
+        help="Do not append assistant audit events.",
+    )
+    email_scheduler.add_argument("--json", action="store_true", dest="json_output")
 
     notification_dispatch = sub.add_parser(
         "assistant-notification-dispatch",
@@ -2352,6 +2425,91 @@ def cmd_training_calendar_reconcile(args) -> int:
     return 1 if payload.get("status") in {"blocked", "failed", "manual_review_required"} else 0
 
 
+def cmd_email_triage_proposals(args) -> int:
+    payload = build_email_triage_proposals(
+        planning_date=args.planning_date,
+        hours=args.hours,
+        limit=args.limit,
+        db_path=args.db_path,
+        ledger_path=args.ledger_path,
+        write_audit=args.write_audit,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Email triage proposals: {payload.get('status')}")
+        print(f"Reason: {payload.get('reason')}")
+        print(f"Target date: {payload.get('target_date')}")
+        print(f"Calendar write attempted: {payload.get('calendar_write_attempted')}")
+        if payload.get("idempotency_key"):
+            print(f"Idempotency key: {payload.get('idempotency_key')}")
+    return 0 if payload.get("status") in {"proposal", "skipped_no_attention_emails", "skipped_duplicate"} else 1
+
+
+def cmd_email_triage_book(args) -> int:
+    payload = book_email_triage_proposal(
+        idempotency_key=args.idempotency_key,
+        planning_date=args.planning_date,
+        calendar_name=args.calendar_name,
+        live=args.live,
+        hours=args.hours,
+        limit=args.limit,
+        db_path=args.db_path,
+        state_db_path=args.state_db,
+        scheduler_db_path=args.scheduler_db,
+        ledger_path=args.ledger_path,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Email triage booking: {payload.get('status')}")
+        print(f"Reason: {payload.get('reason')}")
+        print(f"Idempotency key: {payload.get('idempotency_key')}")
+        print(f"Calendar write attempted: {payload.get('calendar_write_attempted')}")
+    if payload.get("status") in {"created", "skipped_duplicate"}:
+        return 0
+    return 2 if payload.get("reason") == "live_flag_required" else 1
+
+
+def cmd_email_triage_scheduler_run(args) -> int:
+    payload = run_email_triage_scheduler(
+        planning_date=args.planning_date,
+        calendar_name=args.calendar_name,
+        live=args.live,
+        notify_failures=args.notify_failures,
+        notification_dry_run=args.notification_dry_run,
+        notification_channel_id=args.notification_channel_id,
+        hours=args.hours,
+        limit=args.limit,
+        db_path=args.db_path,
+        calendar_state_db_path=args.calendar_state_db,
+        scheduler_db_path=args.scheduler_db,
+        ledger_path=args.ledger_path,
+        state_file=args.state_file,
+        lock_ttl_seconds=args.lock_ttl_seconds,
+        write_audit=args.write_audit,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Email triage scheduler: {payload.get('status')}")
+        print(f"Reason: {payload.get('reason')}")
+        print(f"Target date: {payload.get('target_date')}")
+        print(f"Calendar write attempted: {payload.get('calendar_write_attempted')}")
+        if payload.get("audit_id"):
+            print(f"Audit ID: {payload.get('audit_id')}")
+    if payload.get("status") in {
+        "created",
+        "skipped_duplicate",
+        "skipped_no_attention_emails",
+        "skipped_weekend_target",
+        "skipped_before_morning",
+        "dry_run_proposal",
+    }:
+        return 0
+    return 1
+
+
 def cmd_assistant_notification_dispatch(args) -> int:
     payload = dispatch_failure_notification(
         {
@@ -2636,6 +2794,9 @@ def main() -> int:
         "training-calendar-book": cmd_training_calendar_book,
         "training-calendar-scheduler-run": cmd_training_calendar_scheduler_run,
         "training-calendar-reconcile": cmd_training_calendar_reconcile,
+        "email-triage-proposals": cmd_email_triage_proposals,
+        "email-triage-book": cmd_email_triage_book,
+        "email-triage-scheduler-run": cmd_email_triage_scheduler_run,
         "assistant-notification-dispatch": cmd_assistant_notification_dispatch,
         "assistant-scheduler-health": cmd_assistant_scheduler_health,
         "assistant-dead-letters": cmd_assistant_dead_letters,

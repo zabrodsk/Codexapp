@@ -37,6 +37,22 @@ TRAINING_CALENDAR_DIRECT_PROGRAM_ARGUMENTS = [
     "--notify-failures",
     "--json",
 ]
+EMAIL_TRIAGE_SSH_BRIDGE_PROGRAM_ARGUMENTS = [
+    "/usr/bin/ssh",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "StrictHostKeyChecking=accept-new",
+    "localhost",
+    "cd /Users/clawdbot/.openclaw/workspace && /Users/clawdbot/.openclaw/workspace/.venv/bin/python scripts/email_triage_scheduler.py --live --notify-failures --json",
+]
+EMAIL_TRIAGE_DIRECT_PROGRAM_ARGUMENTS = [
+    "/Users/clawdbot/.openclaw/workspace/.venv/bin/python",
+    "/Users/clawdbot/.openclaw/workspace/scripts/email_triage_scheduler.py",
+    "--live",
+    "--notify-failures",
+    "--json",
+]
 
 
 @dataclass(frozen=True)
@@ -110,9 +126,31 @@ TRAINING_CALENDAR_BOOKING_SPEC = SchedulerJobSpec(
     first_expected_run_after="2026-05-25T06:30:00+02:00",
 )
 
+EMAIL_TRIAGE_BOOKING_SPEC = SchedulerJobSpec(
+    job_name="email_triage_booking",
+    job_label="Rocky email triage booking",
+    workflow="email_triage_scheduler",
+    launchagent=LaunchAgentSpec(
+        label="com.openclaw.rocky-email-triage-booking",
+        plist_path="/Users/clawdbot/Library/LaunchAgents/com.openclaw.rocky-email-triage-booking.plist",
+        program_arguments=EMAIL_TRIAGE_SSH_BRIDGE_PROGRAM_ARGUMENTS,
+        working_directory="/Users/clawdbot/.openclaw/workspace",
+        stdout_path="/Users/clawdbot/.openclaw/logs/rocky-email-triage-booking.log",
+        stderr_path="/Users/clawdbot/.openclaw/logs/rocky-email-triage-booking.err.log",
+        weekdays=[1, 2, 3, 4],
+        hour=9,
+        minute=30,
+        timezone="Europe/Prague",
+        first_expected_run_after="2026-05-25T09:30:00+02:00",
+    ),
+    state_path="/Users/clawdbot/.openclaw/state/email_triage_scheduler.json",
+    first_expected_run_after="2026-05-25T09:30:00+02:00",
+)
+
 JOB_REGISTRY = {
     BETTY_MAIL_TRIAGE_SPEC.job_name: BETTY_MAIL_TRIAGE_SPEC,
     TRAINING_CALENDAR_BOOKING_SPEC.job_name: TRAINING_CALENDAR_BOOKING_SPEC,
+    EMAIL_TRIAGE_BOOKING_SPEC.job_name: EMAIL_TRIAGE_BOOKING_SPEC,
 }
 
 
@@ -157,12 +195,29 @@ def launchagent_execution_mode(program_arguments: list[str]) -> str:
     ):
         return "localhost_ssh_bridge"
     if (
+        program_arguments[:1] == ["/usr/bin/ssh"]
+        and "localhost" in program_arguments
+        and "email_triage_scheduler.py --live" in joined
+        and "--notify-failures" in joined
+        and "--json" in joined
+    ):
+        return "localhost_ssh_bridge"
+    if (
         program_arguments
         and program_arguments[0].endswith("/python")
         and any(arg.endswith("training_calendar_scheduler.py") for arg in program_arguments)
         and "--live" in program_arguments
         and "--reconcile" in program_arguments
         and "--fix-safe" in program_arguments
+        and "--notify-failures" in program_arguments
+        and "--json" in program_arguments
+    ):
+        return "direct_launchd_python"
+    if (
+        program_arguments
+        and program_arguments[0].endswith("/python")
+        and any(arg.endswith("email_triage_scheduler.py") for arg in program_arguments)
+        and "--live" in program_arguments
         and "--notify-failures" in program_arguments
         and "--json" in program_arguments
     ):
@@ -362,24 +417,26 @@ def evaluate_scheduler_job(
             }
         )
 
-    if spec.job_name == "training_calendar_booking":
+    if execution_mode == "localhost_ssh_bridge":
+        bridge = _localhost_ssh_status()
+        signals["localhost_ssh_bridge"] = bridge
+        if bridge.get("status") != "ok":
+            issues.append(
+                {
+                    "status": "blocked",
+                    "failure_class": bridge.get("failure_class") or "localhost_ssh_unavailable",
+                    "summary": f"{spec.job_label} LaunchAgent uses the localhost SSH bridge, but localhost SSH is unavailable.",
+                }
+            )
+    if spec.job_name in {"training_calendar_booking", "email_triage_booking"}:
         if execution_mode == "localhost_ssh_bridge":
-            bridge = _localhost_ssh_status()
-            signals["localhost_ssh_bridge"] = bridge
-            if bridge.get("status") != "ok":
-                issues.append(
-                    {
-                        "status": "blocked",
-                        "failure_class": bridge.get("failure_class") or "localhost_ssh_unavailable",
-                        "summary": "Training calendar LaunchAgent uses the localhost SSH bridge, but localhost SSH is unavailable.",
-                    }
-                )
+            pass
         elif execution_mode == "custom":
             issues.append(
                 {
                     "status": "degraded",
                     "failure_class": "launchagent_execution_mode_unknown",
-                    "summary": "Training calendar LaunchAgent execution mode is not recognized as direct Python or localhost SSH bridge.",
+                    "summary": f"{spec.job_label} LaunchAgent execution mode is not recognized as direct Python or localhost SSH bridge.",
                 }
             )
     elif inspection.status == "degraded":
@@ -431,14 +488,14 @@ def evaluate_scheduler_job(
                 "summary": proxy_state.get("summary") or "Helper state is degraded.",
             }
         )
-    if spec.job_name == "training_calendar_booking":
+    if spec.job_name in {"training_calendar_booking", "email_triage_booking"}:
         helper_payload = proxy_state.get("state") or {}
         if helper_payload.get("error_hash"):
             issues.append(
                 {
                     "status": "degraded",
-                    "failure_class": "training_calendar_scheduler_error_hash_present",
-                    "summary": "Training calendar scheduler state has an error hash; inspect the safe state and recent dead letters.",
+                    "failure_class": f"{spec.job_name}_error_hash_present",
+                    "summary": f"{spec.job_label} scheduler state has an error hash; inspect the safe state and recent dead letters.",
                 }
             )
 

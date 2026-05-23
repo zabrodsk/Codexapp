@@ -163,8 +163,9 @@ def dispatch_failure_notification(
 
 
 def render_notification(payload: dict[str, Any]) -> str:
+    workflow = str(payload.get("workflow") or payload.get("job_name") or "assistant workflow").replace("_", " ")
     lines = [
-        "Rocky training calendar needs attention",
+        f"Rocky {workflow} needs attention",
         f"Status: {payload.get('status')}",
         f"Reason: {payload.get('reason')}",
     ]
