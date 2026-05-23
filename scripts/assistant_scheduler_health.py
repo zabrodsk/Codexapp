@@ -1,0 +1,435 @@
+#!/usr/bin/env python3
+"""Read-only scheduler health monitor for Rocky assistant jobs."""
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any
+from zoneinfo import ZoneInfo
+
+from assistant_audit_log import AssistantAuditLog
+from assistant_launchd import LaunchAgentSpec, inspect_launchagent
+from assistant_scheduler_state import AssistantSchedulerState, utc_now_iso
+
+
+SCHEDULER_POLICY_VERSION = "rocky-scheduler-policy-v1"
+OPENCLAW_ROOT = Path("/Users/clawdbot/.openclaw")
+WORKSPACE_ROOT = OPENCLAW_ROOT / "workspace"
+
+
+@dataclass(frozen=True)
+class SchedulerJobSpec:
+    job_name: str
+    job_label: str
+    workflow: str
+    launchagent: LaunchAgentSpec
+    old_openclaw_cron_job_id: str | None = None
+    old_openclaw_cron_job_name: str | None = None
+    old_openclaw_cron_jobs_path: str = str(OPENCLAW_ROOT / "cron" / "jobs.json")
+    state_path: str | None = None
+    first_expected_run_after: str | None = None
+    missing_log_grace_minutes: int = 120
+
+
+BETTY_MAIL_TRIAGE_SPEC = SchedulerJobSpec(
+    job_name="betty_mail_triage",
+    job_label="Betty weekday mail triage",
+    workflow="betty_mail_triage",
+    launchagent=LaunchAgentSpec(
+        label="com.openclaw.betty-mail-triage",
+        plist_path="/Users/clawdbot/Library/LaunchAgents/com.openclaw.betty-mail-triage.plist",
+        program_arguments=[
+            "/usr/bin/python3",
+            "/Users/clawdbot/.openclaw/workspace/scripts/betty_mail_triage_proxy.py",
+        ],
+        working_directory="/Users/clawdbot/.openclaw/workspace",
+        stdout_path="/Users/clawdbot/.openclaw/logs/betty-mail-triage.log",
+        stderr_path="/Users/clawdbot/.openclaw/logs/betty-mail-triage.err.log",
+        weekdays=[1, 2, 3, 4, 5],
+        hour=9,
+        minute=0,
+        timezone="Europe/Prague",
+        first_expected_run_after="2026-05-25T09:00:00+02:00",
+    ),
+    old_openclaw_cron_job_id="77a8b46c-49aa-4d6d-9789-d00b8b3ba3dd",
+    old_openclaw_cron_job_name="betty-weekday-mail-triage",
+    state_path="/Users/clawdbot/.openclaw/state/betty_mail_triage_proxy.json",
+    first_expected_run_after="2026-05-25T09:00:00+02:00",
+)
+
+JOB_REGISTRY = {
+    BETTY_MAIL_TRIAGE_SPEC.job_name: BETTY_MAIL_TRIAGE_SPEC,
+}
+
+
+def stable_scheduler_key(*, job_name: str, date_key: str, signal: str) -> str:
+    digest = hashlib.sha256(f"{job_name}:{date_key}:{signal}".encode("utf-8")).hexdigest()[:16]
+    return f"scheduler:{job_name}:{date_key}:{digest}"
+
+
+def _parse_iso(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _load_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _hash_file_tail(path: Path, *, max_chars: int = 2000) -> str | None:
+    if not path.exists():
+        return None
+    data = path.read_text(encoding="utf-8", errors="replace")
+    tail = data[-max_chars:]
+    return hashlib.sha256(tail.encode("utf-8")).hexdigest()[:16]
+
+
+def _old_cron_status(spec: SchedulerJobSpec) -> dict[str, Any]:
+    if not spec.old_openclaw_cron_job_id:
+        return {"status": "not_configured"}
+    path = Path(spec.old_openclaw_cron_jobs_path)
+    if not path.exists():
+        return {
+            "status": "unknown",
+            "failure_class": "target_not_found",
+            "summary": f"Cron jobs file not found at {path}",
+        }
+    try:
+        data = _load_json(path)
+    except Exception as exc:
+        return {
+            "status": "unknown",
+            "failure_class": "unknown_error",
+            "summary": f"Cron jobs file unreadable: {exc}",
+        }
+    jobs = data.get("jobs", data) if isinstance(data, dict) else data
+    for job in jobs or []:
+        if not isinstance(job, dict):
+            continue
+        if str(job.get("id")) == spec.old_openclaw_cron_job_id:
+            enabled = bool(job.get("enabled", True))
+            return {
+                "status": "enabled" if enabled else "disabled",
+                "enabled": enabled,
+                "job_id": spec.old_openclaw_cron_job_id,
+                "job_name": str(job.get("name") or ""),
+            }
+    return {
+        "status": "unknown",
+        "failure_class": "target_not_found",
+        "summary": f"Old cron job {spec.old_openclaw_cron_job_id} not found",
+    }
+
+
+def _log_status(spec: SchedulerJobSpec, *, now: datetime) -> dict[str, Any]:
+    stdout = Path(spec.launchagent.stdout_path)
+    stderr = Path(spec.launchagent.stderr_path)
+    first_expected = _parse_iso(spec.first_expected_run_after)
+    before_first_expected = bool(first_expected and now < first_expected)
+    after_grace = bool(
+        first_expected
+        and now > first_expected + timedelta(minutes=spec.missing_log_grace_minutes)
+    )
+    stdout_exists = stdout.exists()
+    stderr_exists = stderr.exists()
+    stderr_size = stderr.stat().st_size if stderr_exists else 0
+    result = {
+        "stdout_path": str(stdout),
+        "stderr_path": str(stderr),
+        "stdout_exists": stdout_exists,
+        "stderr_exists": stderr_exists,
+        "stderr_size": stderr_size,
+        "before_first_expected": before_first_expected,
+        "after_first_run_grace": after_grace,
+        "stderr_hash": _hash_file_tail(stderr) if stderr_exists and stderr_size else None,
+    }
+    if before_first_expected and not stdout_exists and not stderr_exists:
+        result.update({"status": "pending_first_run", "summary": "Logs are not expected before first natural run."})
+    elif after_grace and not stdout_exists and not stderr_exists:
+        result.update(
+            {
+                "status": "blocked",
+                "failure_class": "launchagent_log_missing",
+                "summary": "Logs are missing after the first expected run grace window.",
+            }
+        )
+    elif stderr_exists and stderr_size > 0:
+        result.update(
+            {
+                "status": "degraded",
+                "failure_class": "launchagent_stderr_present",
+                "summary": "Stderr log contains content; inspect safe hash/reference before rerun.",
+            }
+        )
+    else:
+        result.update({"status": "healthy", "summary": "Log state is acceptable."})
+    return result
+
+
+def _betty_proxy_state(spec: SchedulerJobSpec) -> dict[str, Any]:
+    if not spec.state_path:
+        return {"status": "not_configured"}
+    path = Path(spec.state_path)
+    if not path.exists():
+        return {"status": "missing", "state_path": str(path)}
+    try:
+        state = _load_json(path)
+    except Exception as exc:
+        return {
+            "status": "degraded",
+            "failure_class": "state_unreadable",
+            "state_path": str(path),
+            "summary": str(exc),
+        }
+    safe_state = {
+        "last_success_date": state.get("last_success_date"),
+        "last_success_at": state.get("last_success_at"),
+        "memory_path": state.get("memory_path"),
+    }
+    return {"status": "ok", "state_path": str(path), "state": safe_state}
+
+
+def _max_status(statuses: list[str]) -> str:
+    order = {"healthy": 0, "degraded": 1, "unknown": 1, "blocked": 2}
+    if not statuses:
+        return "healthy"
+    return max(statuses, key=lambda item: order.get(item, 1))
+
+
+def evaluate_scheduler_job(
+    spec: SchedulerJobSpec,
+    *,
+    now: datetime | None = None,
+    state_db_path: Path | str | None = None,
+    audit_log_path: Path | str | None = None,
+    write_state: bool = True,
+    write_audit: bool = True,
+    launchctl_text: str | None = None,
+    launchctl_returncode: int = 0,
+    read_launchctl: bool = True,
+) -> dict[str, Any]:
+    tz = ZoneInfo(spec.launchagent.timezone)
+    now = now.astimezone(tz) if now else datetime.now(tz)
+    date_key = now.date().isoformat()
+    issues: list[dict[str, Any]] = []
+    signals: dict[str, Any] = {}
+
+    inspection = inspect_launchagent(
+        spec.launchagent,
+        now=now,
+        launchctl_text=launchctl_text,
+        launchctl_returncode=launchctl_returncode,
+        read_launchctl=read_launchctl,
+    )
+    signals["launchagent"] = inspection.to_dict()
+    if inspection.status == "blocked":
+        issues.append(
+            {
+                "status": "blocked",
+                "failure_class": inspection.failure_class or "launchagent_not_loaded",
+                "summary": ", ".join(inspection.issues) or "LaunchAgent is blocked.",
+            }
+        )
+    elif inspection.status == "degraded":
+        issues.append(
+            {
+                "status": "degraded",
+                "failure_class": inspection.failure_class or "launchagent_mismatch",
+                "summary": ", ".join(inspection.issues) or "LaunchAgent is degraded.",
+            }
+        )
+
+    old_cron = _old_cron_status(spec)
+    signals["old_openclaw_cron"] = old_cron
+    if old_cron.get("enabled"):
+        issues.append(
+            {
+                "status": "blocked",
+                "failure_class": "old_cron_unexpected_enabled",
+                "summary": "Old OpenClaw cron job is unexpectedly enabled.",
+            }
+        )
+    elif old_cron.get("status") == "unknown":
+        issues.append(
+            {
+                "status": "degraded",
+                "failure_class": old_cron.get("failure_class") or "unknown_error",
+                "summary": old_cron.get("summary") or "Old cron status is unknown.",
+            }
+        )
+
+    logs = _log_status(spec, now=now)
+    signals["logs"] = logs
+    if logs["status"] in {"blocked", "degraded"}:
+        issues.append(
+            {
+                "status": logs["status"],
+                "failure_class": logs.get("failure_class"),
+                "summary": logs.get("summary"),
+            }
+        )
+
+    proxy_state = _betty_proxy_state(spec)
+    signals["helper_state"] = proxy_state
+    if proxy_state.get("status") == "degraded":
+        issues.append(
+            {
+                "status": "degraded",
+                "failure_class": proxy_state.get("failure_class"),
+                "summary": proxy_state.get("summary") or "Helper state is degraded.",
+            }
+        )
+
+    overall_status = _max_status([issue["status"] for issue in issues])
+    failure_class = next(
+        (issue.get("failure_class") for issue in issues if issue["status"] == "blocked"),
+        None,
+    ) or next((issue.get("failure_class") for issue in issues), None)
+    if not issues:
+        summary = f"{spec.job_label} scheduler health is ok."
+    else:
+        summary = "; ".join(str(issue.get("summary") or issue.get("failure_class")) for issue in issues)
+
+    idempotency_key = stable_scheduler_key(
+        job_name=spec.job_name,
+        date_key=date_key,
+        signal=overall_status,
+    )
+    payload = {
+        "job_name": spec.job_name,
+        "job_label": spec.job_label,
+        "workflow": spec.workflow,
+        "status": overall_status,
+        "failure_class": failure_class,
+        "summary": summary,
+        "checked_at": now.isoformat(),
+        "idempotency_key": idempotency_key,
+        "issues": issues,
+        "signals": signals,
+        "side_effects": (["local_scheduler_db"] if write_state else [])
+        + (["assistant_audit_log"] if write_audit else []),
+        "helpers_run": False,
+        "notifications_sent": False,
+        "calendar_write_attempted": False,
+    }
+
+    if write_state:
+        state = AssistantSchedulerState(state_db_path)
+        run_status = {
+            "healthy": "succeeded",
+            "degraded": "stale",
+            "blocked": "dead_lettered",
+            "unknown": "unknown",
+        }.get(overall_status, "unknown")
+        state.record_job_run(
+            job_name=spec.job_name,
+            job_label=spec.job_label,
+            scheduled_for=signals["launchagent"].get("previous_expected_run"),
+            status=run_status,
+            idempotency_key=idempotency_key,
+            launchagent_label=spec.launchagent.label,
+            program=spec.launchagent.program,
+            exit_code=signals["launchagent"].get("launchctl", {}).get("last_exit_code"),
+            failure_class=failure_class,
+            summary=summary,
+            error_hash=logs.get("stderr_hash"),
+        )
+        if overall_status == "blocked":
+            dead_letter = state.upsert_dead_letter(
+                job_name=spec.job_name,
+                workflow=spec.workflow,
+                idempotency_key=idempotency_key,
+                failure_class=failure_class or "unknown_error",
+                safe_summary=summary,
+                source_refs=[spec.launchagent.plist_path, spec.old_openclaw_cron_jobs_path],
+                recovery_hint="Inspect LaunchAgent, old cron state, and helper logs before rerunning.",
+                error_hash=logs.get("stderr_hash"),
+            )
+            payload["dead_letter"] = dead_letter
+
+    if write_audit:
+        audit_log = AssistantAuditLog(audit_log_path)
+        event_type = {
+            "healthy": "scheduler.health_ok",
+            "degraded": "scheduler.health_degraded",
+            "blocked": "scheduler.health_blocked",
+            "unknown": "scheduler.health_degraded",
+        }.get(overall_status, "scheduler.health_degraded")
+        decision = {
+            "healthy": "allowed",
+            "degraded": "degraded",
+            "blocked": "blocked",
+            "unknown": "degraded",
+        }.get(overall_status, "degraded")
+        event = audit_log.record_event(
+            event_type=event_type,
+            workflow=spec.workflow,
+            idempotency_key=idempotency_key,
+            policy_version=SCHEDULER_POLICY_VERSION,
+            decision=decision,
+            reason=summary,
+            sources=[spec.launchagent.plist_path, spec.old_openclaw_cron_jobs_path],
+            artifacts={
+                "job_name": spec.job_name,
+                "status": overall_status,
+                "failure_class": failure_class,
+                "signals": signals,
+            },
+        )
+        payload["audit_id"] = event.audit_id
+    return payload
+
+
+def evaluate_all_scheduler_jobs(
+    *,
+    job_name: str | None = None,
+    now: datetime | None = None,
+    state_db_path: Path | str | None = None,
+    audit_log_path: Path | str | None = None,
+    write_state: bool = True,
+    write_audit: bool = True,
+) -> dict[str, Any]:
+    specs = [JOB_REGISTRY[job_name]] if job_name else list(JOB_REGISTRY.values())
+    jobs = [
+        evaluate_scheduler_job(
+            spec,
+            now=now,
+            state_db_path=state_db_path,
+            audit_log_path=audit_log_path,
+            write_state=write_state,
+            write_audit=write_audit,
+        )
+        for spec in specs
+    ]
+    status = _max_status([job["status"] for job in jobs])
+    return {
+        "status": status,
+        "checked_at": utc_now_iso(),
+        "jobs": jobs,
+        "helpers_run": False,
+        "notifications_sent": False,
+        "calendar_write_attempted": False,
+    }
+
+
+def format_scheduler_health_report(payload: dict[str, Any]) -> str:
+    lines = ["Assistant Scheduler Health", "=" * 28]
+    status_icons = {"healthy": "[OK]", "degraded": "[WARN]", "blocked": "[FAIL]", "unknown": "[????]"}
+    for job in payload.get("jobs") or []:
+        icon = status_icons.get(job.get("status"), "[????]")
+        lines.append(f"{icon} {job.get('job_name')}: {job.get('summary')}")
+        dead_letter = job.get("dead_letter")
+        if dead_letter:
+            lines.append(f"     -> dead_letter: {dead_letter.get('dead_letter_id')}")
+    lines.append("")
+    lines.append(f"Summary: {payload.get('status')}")
+    return "\n".join(lines)
