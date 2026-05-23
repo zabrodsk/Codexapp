@@ -1,0 +1,95 @@
+{
+  "version": 1,
+  "risk_order": ["low", "medium", "high", "critical"],
+  "rules": [
+    {
+      "code": "INSTRUCTION_OVERRIDE",
+      "category": "instruction_override",
+      "severity": "high",
+      "patterns": [
+        "ignore\\s+(all\\s+)?(previous|prior|above)\\s+instructions",
+        "disregard\\s+(all\\s+)?(previous|prior|above)\\s+instructions",
+        "\\bnew\\s+(system|developer)\\s+(prompt|message|instructions?)\\b",
+        "\\byou\\s+are\\s+now\\b",
+        "\\bact\\s+as\\b"
+      ]
+    },
+    {
+      "code": "SECRET_OR_MEMORY_EXFILTRATION",
+      "category": "secret_or_memory_exfiltration",
+      "severity": "critical",
+      "patterns": [
+        "\\bsend\\s+(me\\s+)?(your\\s+)?memory\\b",
+        "\\bexport\\s+(your\\s+)?memory\\b",
+        "\\bdump\\s+(your\\s+)?memory\\b",
+        "\\breveal\\s+(secrets?|credentials?|tokens?|api\\s*keys?|ssh\\s*keys?|private\\s*keys?)\\b",
+        "\\b(read|dump|print|show)\\s+(env|environment\\s+variables?)\\b"
+      ]
+    },
+    {
+      "code": "TOOL_OR_EXECUTION_REQUEST",
+      "category": "tool_or_execution_request",
+      "severity": "high",
+      "patterns": [
+        "\\brun\\s+(this\\s+)?(shell\\s+)?command\\b",
+        "\\bexecute\\s+(this\\s+)?(code|command|script)\\b",
+        "\\bcall\\s+(this\\s+)?tool\\b",
+        "\\buse\\s+the\\s+(exec|shell|bash|terminal)\\s+tool\\b",
+        "\\bdisable\\s+(tool\\s+)?(guardrails?|safety|approval)"
+      ]
+    },
+    {
+      "code": "CONCEALMENT",
+      "category": "concealment",
+      "severity": "critical",
+      "patterns": [
+        "\\bdo\\s+not\\s+tell\\s+(dusan|the\\s+user)\\b",
+        "\\bdon't\\s+tell\\s+(dusan|the\\s+user)\\b",
+        "\\bhide\\s+this\\s+from\\s+(dusan|the\\s+user)\\b",
+        "\\bdisable\\s+logging\\b",
+        "\\bdelete\\s+(the\\s+)?logs?\\b"
+      ]
+    },
+    {
+      "code": "MEMORY_POLICY_CHANGE",
+      "category": "memory_policy_change",
+      "severity": "high",
+      "patterns": [
+        "\\bwrite\\s+this\\s+to\\s+memory\\b",
+        "\\bupdate\\s+(your\\s+)?memory\\b",
+        "\\bchange\\s+your\\s+rules\\b",
+        "\\bupdate\\s+your\\s+(prompt|instructions|policy|policies)\\b",
+        "\\bchange\\s+(memory|tool)\\s+policy\\b"
+      ]
+    },
+    {
+      "code": "HIDDEN_HTML",
+      "category": "obfuscation",
+      "severity": "high",
+      "patterns": [
+        "display\\s*:\\s*none",
+        "visibility\\s*:\\s*hidden",
+        "font-size\\s*:\\s*0(?:px|pt|em|rem)?",
+        "color\\s*:\\s*(?:#fff|#ffffff|white)\\b",
+        "opacity\\s*:\\s*0(?:\\.0+)?\\b",
+        "<!--[\\s\\S]*?-->"
+      ]
+    },
+    {
+      "code": "UNICODE_DIRECTION_OVERRIDE",
+      "category": "obfuscation",
+      "severity": "high",
+      "patterns": [
+        "[\\u202A-\\u202E\\u2066-\\u2069]"
+      ]
+    },
+    {
+      "code": "BASE64_LIKE_BLOB",
+      "category": "obfuscation",
+      "severity": "medium",
+      "patterns": [
+        "(?:[A-Za-z0-9+/]{80,}={0,2})"
+      ]
+    }
+  ]
+}

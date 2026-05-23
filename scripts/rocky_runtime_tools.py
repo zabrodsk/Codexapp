@@ -82,6 +82,7 @@ from obsidian_memory import (
     write_obsidian_note,
 )
 from assistant_audit_log import AssistantAuditLog
+from agentmail_bridge_health import build_agentmail_bridge_health
 from assistant_calendar_dry_run import build_calendar_dry_run
 from assistant_calendar_policy import POLICY_VERSION, evaluate_calendar_policy
 from assistant_calendar_status import (
@@ -143,6 +144,8 @@ RUNTIME_DEPLOY_MANIFEST_PATH = ROOT / "deploy" / "runtime-manifest.json"
 RUNTIME_DEPLOYABLE_FILES = (
     "scripts/rocky_runtime_tools.py",
     "scripts/assistant_audit_log.py",
+    "scripts/agentmail_bridge_health.py",
+    "scripts/agentmail_bridge_deploy.py",
     "scripts/assistant_calendar_dry_run.py",
     "scripts/assistant_calendar_policy.py",
     "scripts/assistant_calendar_state.py",
@@ -204,6 +207,15 @@ RUNTIME_DEPLOYABLE_FILES = (
     "scripts/training_calendar_scheduler.py",
     "scripts/trainingpeaks_ics_reader.py",
     "scripts/trainingpeaks_read_path_probe.py",
+    "services/agentmail-bridge/bridge.mjs",
+    "services/agentmail-bridge/test_email_security_bridge.mjs",
+    "services/agentmail-bridge/package.json",
+    "services/agentmail-bridge/package-lock.json",
+    "services/agentmail-bridge/config.example.json",
+    "services/agentmail-bridge/launchagents/ai.openclaw.agentmail-bridge.plist.template",
+    "services/email-security/email_security.mjs",
+    "services/email-security/rules.json",
+    "docs/agentmail-bridge-runbook.md",
     "tests/test_runtime_integration.py",
 )
 RUNTIME_ANSWER_CONTEXT_LIMIT = 5
@@ -1093,6 +1105,14 @@ def build_parser() -> argparse.ArgumentParser:
     notification_dispatch.add_argument("--scheduler-db", dest="scheduler_db")
     notification_dispatch.add_argument("--dry-run", action="store_true", dest="dry_run")
     notification_dispatch.add_argument("--json", action="store_true", dest="json_output")
+
+    agentmail_health = sub.add_parser(
+        "agentmail-bridge-health",
+        help="Check AgentMail bridge source/deploy drift and LaunchAgent status.",
+    )
+    agentmail_health.add_argument("--run-tests", action="store_true", help="Run tracked Node tests as part of health.")
+    agentmail_health.add_argument("--no-launchctl", action="store_false", dest="read_launchctl", default=True)
+    agentmail_health.add_argument("--json", action="store_true", dest="json_output")
 
     scheduler_health = sub.add_parser(
         "assistant-scheduler-health",
@@ -3212,6 +3232,20 @@ def cmd_calendar_tcc_probe(args) -> int:
     return 0 if payload.get("status") == "ok" else 1
 
 
+def cmd_agentmail_bridge_health(args) -> int:
+    payload = build_agentmail_bridge_health(
+        run_tests=getattr(args, "run_tests", False),
+        read_launchctl=getattr(args, "read_launchctl", True),
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"AgentMail bridge: {payload.get('status')} ({payload.get('recommendation')})")
+        for item in payload.get("files", []):
+            print(f"- {item.get('path')}: {item.get('status')}")
+    return 0 if payload.get("status") in {"ok", "degraded"} else 1
+
+
 def cmd_assistant_scheduler_health(args) -> int:
     payload = evaluate_all_scheduler_jobs(
         job_name=args.job,
@@ -3487,6 +3521,7 @@ def main() -> int:
         "task-command-capture-run": cmd_task_command_capture_run,
         "task-spine-scheduler-run": cmd_task_spine_scheduler_run,
         "assistant-notification-dispatch": cmd_assistant_notification_dispatch,
+        "agentmail-bridge-health": cmd_agentmail_bridge_health,
         "assistant-scheduler-health": cmd_assistant_scheduler_health,
         "assistant-dead-letters": cmd_assistant_dead_letters,
         "assistant-lock-smoke": cmd_assistant_lock_smoke,

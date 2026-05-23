@@ -48,6 +48,7 @@ from rocky_runtime_tools import (
     cmd_training_calendar_reconcile,
     cmd_training_calendar_scheduler_run,
     cmd_assistant_notification_dispatch,
+    cmd_agentmail_bridge_health,
     cmd_trainingpeaks_ics_preview,
     cmd_trainingpeaks_read_path_check,
 )
@@ -162,6 +163,17 @@ def test_parser_includes_assistant_commands():
     assert parser.parse_args(
         ["assistant-notification-dispatch", "--status", "blocked", "--reason", "test", "--dry-run"]
     ).command == "assistant-notification-dispatch"
+    assert parser.parse_args(["agentmail-bridge-health"]).command == "agentmail-bridge-health"
+
+
+def test_agentmail_bridge_health_runtime_command_is_wired(capsys):
+    with patch("rocky_runtime_tools.build_agentmail_bridge_health", return_value={"status": "ok", "recommendation": "none", "files": [], "secrets_included": False}):
+        result = cmd_agentmail_bridge_health(_args(run_tests=True, read_launchctl=False, json_output=True))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert payload["status"] == "ok"
+    assert payload["secrets_included"] is False
 
 
 def test_task_detector_llm_health_json_uses_safe_helper(capsys):
@@ -762,6 +774,11 @@ def test_calendar_tcc_probe_json_uses_probe_engine(capsys):
 def test_runtime_deployable_files_include_training_calendar_modules():
     from rocky_runtime_tools import RUNTIME_DEPLOYABLE_FILES
 
+    assert "scripts/agentmail_bridge_health.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/agentmail_bridge_deploy.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "services/agentmail-bridge/bridge.mjs" in RUNTIME_DEPLOYABLE_FILES
+    assert "services/email-security/email_security.mjs" in RUNTIME_DEPLOYABLE_FILES
+    assert "docs/agentmail-bridge-runbook.md" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/training_calendar_proposal_engine.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/training_calendar_live_booking.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/training_calendar_scheduler.py" in RUNTIME_DEPLOYABLE_FILES

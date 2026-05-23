@@ -1,0 +1,27 @@
+{
+  "inbox": "example-inbox",
+  "userAddresses": [
+    "user@example.com"
+  ],
+  "approverDiscordUserId": "000000000000000000",
+  "approvalChannelId": "000000000000000000",
+  "defaultRoute": {
+    "kind": "agent",
+    "agentKey": "rocky"
+  },
+  "subjectRouting": {
+    "knowledge": {
+      "kind": "agent",
+      "agentKey": "rocky",
+      "archive": "knowledge"
+    },
+    "focus": {
+      "kind": "script",
+      "script": "/Users/clawdbot/.openclaw/workspace/scripts/sources/focus_email_ingest.py",
+      "python": "/Users/clawdbot/.openclaw/skills/agentmail/.venv/bin/python3"
+    }
+  },
+  "openclawBin": "/opt/homebrew/bin/openclaw",
+  "maxBodyChars": 1500,
+  "spamNotify": false
+}
