@@ -105,6 +105,7 @@ from coding_signal_sync import run_sync as run_coding_signal_sync
 from coding_work_briefing_builder import build_coding_work_briefing
 from coding_work_scheduler import run_coding_work_scheduler
 from daily_personal_briefing_scheduler import explain_daily_priorities, list_daily_personal_briefing_runs, run_daily_personal_briefing, run_daily_personal_briefing_scheduler
+from daily_personal_briefing_readiness import evaluate_daily_personal_briefing_readiness
 from daily_priority_arbitrator import arbitrate_daily_priorities
 from email_triage_live_booking import book_email_triage_proposal
 from email_triage_proposal_engine import build_email_triage_proposals
@@ -174,6 +175,7 @@ RUNTIME_DEPLOYABLE_FILES = (
     "scripts/daily_priority_arbitrator.py",
     "scripts/daily_personal_briefing_renderer.py",
     "scripts/daily_personal_briefing_scheduler.py",
+    "scripts/daily_personal_briefing_readiness.py",
     "scripts/email_triage_live_booking.py",
     "scripts/email_triage_proposal_engine.py",
     "scripts/email_triage_reader.py",
@@ -1179,6 +1181,16 @@ def build_parser() -> argparse.ArgumentParser:
     daily_recent.add_argument("--limit", type=int, default=20)
     daily_recent.add_argument("--state-db", dest="state_db")
     daily_recent.add_argument("--json", action="store_true", dest="json_output")
+
+    daily_readiness = sub.add_parser(
+        "daily-personal-briefing-readiness",
+        help="Read-only production readiness gate for Rocky's daily personal briefing natural run.",
+    )
+    daily_readiness.add_argument("--expected-date", dest="expected_date")
+    daily_readiness.add_argument("--now-local", dest="now_local")
+    daily_readiness.add_argument("--state-db", dest="state_db")
+    daily_readiness.add_argument("--audit-ledger", dest="audit_ledger")
+    daily_readiness.add_argument("--json", action="store_true", dest="json_output")
 
     notification_dispatch = sub.add_parser(
         "assistant-notification-dispatch",
@@ -3024,6 +3036,22 @@ def cmd_daily_personal_briefing_recent(args) -> int:
     return 0 if payload.get("status") == "ok" else 1
 
 
+def cmd_daily_personal_briefing_readiness(args) -> int:
+    payload = evaluate_daily_personal_briefing_readiness(
+        expected_date=args.expected_date,
+        now_local=args.now_local,
+        scheduler_db_path=args.state_db,
+        audit_log_path=args.audit_ledger,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(payload.get("summary") or f"Daily personal briefing readiness: {payload.get('status')}")
+        for hint in payload.get("recovery_hints") or []:
+            print(f"- {hint}")
+    return 0 if payload.get("status") == "ready_verified" else 1
+
+
 def cmd_assistant_notification_dispatch(args) -> int:
     payload = dispatch_failure_notification(
         {
@@ -3715,6 +3743,7 @@ def main() -> int:
         "daily-priority-explain": cmd_daily_priority_explain,
         "daily-personal-briefing-run": cmd_daily_personal_briefing_run,
         "daily-personal-briefing-recent": cmd_daily_personal_briefing_recent,
+        "daily-personal-briefing-readiness": cmd_daily_personal_briefing_readiness,
         "task-command-apply": cmd_task_command_apply,
         "task-command-capture-run": cmd_task_command_capture_run,
         "task-command-recent": cmd_task_command_recent,

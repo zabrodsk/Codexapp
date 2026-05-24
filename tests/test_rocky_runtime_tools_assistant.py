@@ -50,6 +50,7 @@ from rocky_runtime_tools import (
     cmd_training_calendar_reconcile,
     cmd_training_calendar_scheduler_run,
     cmd_daily_personal_briefing_recent,
+    cmd_daily_personal_briefing_readiness,
     cmd_daily_priority_explain,
     cmd_assistant_notification_dispatch,
     cmd_agentmail_bridge_health,
@@ -166,6 +167,7 @@ def test_parser_includes_assistant_commands():
     assert parser.parse_args(["daily-priority-explain", "--planning-date", "2026-05-25"]).command == "daily-priority-explain"
     assert parser.parse_args(["daily-personal-briefing-run", "--live", "--notify", "--apply-safe-bookings"]).command == "daily-personal-briefing-run"
     assert parser.parse_args(["daily-personal-briefing-recent"]).command == "daily-personal-briefing-recent"
+    assert parser.parse_args(["daily-personal-briefing-readiness", "--expected-date", "2026-05-25"]).command == "daily-personal-briefing-readiness"
     assert parser.parse_args(["task-command-apply", "--text", "remember this"]).command == "task-command-apply"
     assert parser.parse_args(["task-command-capture-run"]).command == "task-command-capture-run"
     assert parser.parse_args(["task-command-recent"]).command == "task-command-recent"
@@ -221,6 +223,17 @@ def test_daily_personal_briefing_recent_and_explain_commands_are_wired(capsys):
     assert result == 0
     assert payload["explanations"][0]["category"] == "task"
     explain.assert_called_once()
+
+    with patch("rocky_runtime_tools.evaluate_daily_personal_briefing_readiness", return_value={"status": "ready_verified", "summary": "ready"}) as readiness:
+        result = cmd_daily_personal_briefing_readiness(_args(expected_date="2026-05-25", now_local=None, state_db="/tmp/state.sqlite3", audit_ledger="/tmp/audit.jsonl", json_output=True))
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert payload["status"] == "ready_verified"
+    readiness.assert_called_once()
+
+    with patch("rocky_runtime_tools.evaluate_daily_personal_briefing_readiness", return_value={"status": "ready_pending_natural_run", "summary": "pending"}):
+        result = cmd_daily_personal_briefing_readiness(_args(expected_date="2026-05-25", now_local=None, state_db=None, audit_ledger=None, json_output=True))
+    assert result == 1
 
 
 def test_task_detector_llm_health_json_uses_safe_helper(capsys):
@@ -863,6 +876,7 @@ def test_runtime_deployable_files_include_training_calendar_modules():
     assert "scripts/daily_priority_arbitrator.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/daily_personal_briefing_renderer.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/daily_personal_briefing_scheduler.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/daily_personal_briefing_readiness.py" in RUNTIME_DEPLOYABLE_FILES
     assert "skills/coding-session-inspector/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
     assert "skills/coding-memory-enricher/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
     assert "skills/coding-work-briefing/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
