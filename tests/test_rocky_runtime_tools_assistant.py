@@ -51,6 +51,11 @@ from rocky_runtime_tools import (
     cmd_training_calendar_scheduler_run,
     cmd_daily_personal_briefing_recent,
     cmd_daily_personal_briefing_readiness,
+    cmd_weekly_personal_review,
+    cmd_weekly_personal_review_run,
+    cmd_weekly_personal_review_recent,
+    cmd_weekly_personal_review_readiness,
+    cmd_weekly_calendar_hygiene,
     cmd_daily_priority_explain,
     cmd_assistant_notification_dispatch,
     cmd_agentmail_bridge_health,
@@ -176,6 +181,11 @@ def test_parser_includes_assistant_commands():
     assert parser.parse_args(["daily-personal-briefing-run", "--live", "--notify", "--apply-safe-bookings"]).command == "daily-personal-briefing-run"
     assert parser.parse_args(["daily-personal-briefing-recent"]).command == "daily-personal-briefing-recent"
     assert parser.parse_args(["daily-personal-briefing-readiness", "--expected-date", "2026-05-25"]).command == "daily-personal-briefing-readiness"
+    assert parser.parse_args(["weekly-personal-review"]).command == "weekly-personal-review"
+    assert parser.parse_args(["weekly-personal-review-run", "--live", "--notify"]).command == "weekly-personal-review-run"
+    assert parser.parse_args(["weekly-personal-review-recent"]).command == "weekly-personal-review-recent"
+    assert parser.parse_args(["weekly-personal-review-readiness", "--expected-week", "2026-W22"]).command == "weekly-personal-review-readiness"
+    assert parser.parse_args(["weekly-calendar-hygiene", "--start-date", "2026-05-25"]).command == "weekly-calendar-hygiene"
     assert parser.parse_args(["assistant-outcomes-collect"]).command == "assistant-outcomes-collect"
     assert parser.parse_args(["assistant-learning-summary"]).command == "assistant-learning-summary"
     assert parser.parse_args(["assistant-preferences-show"]).command == "assistant-preferences-show"
@@ -1162,3 +1172,40 @@ def test_assistant_learning_runtime_commands(tmp_path, capsys):
     assert cmd_assistant_learning_apply(_args(proposal_id="missing", learning_db=str(tmp_path / "learning.sqlite3"), ledger_path=str(tmp_path / "audit.jsonl"), live=False, json_output=True)) == 2
     assert cmd_assistant_learning_scheduler_run(_args(planning_date="2026-05-25", since_days=7, live=False, notify_failures=False, notification_dry_run=False, notification_channel_id=None, learning_db=str(tmp_path / "learning.sqlite3"), scheduler_db=str(tmp_path / "scheduler.sqlite3"), calendar_state_db=str(tmp_path / "calendar.sqlite3"), ledger_path=str(tmp_path / "audit.jsonl"), state_file=str(tmp_path / "state.json"), lock_ttl_seconds=1800, write_audit=False, json_output=True)) == 0
     assert cmd_assistant_learning_calibration_review(_args(learning_db=str(tmp_path / "learning.sqlite3"), limit=10, json_output=True)) == 0
+
+
+def test_weekly_personal_review_runtime_commands_are_wired(capsys):
+    with patch("rocky_runtime_tools.build_weekly_personal_review", return_value={"status": "ok", "discord_message": "Rocky weekly review\n\nDo first"}) as review:
+        result = cmd_weekly_personal_review(_args(planning_date="2026-05-25", db_path=None, scheduler_db=None, json_output=True))
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert payload["status"] == "ok"
+    review.assert_called_once()
+
+    with patch("rocky_runtime_tools.run_weekly_personal_review_scheduler", return_value={"status": "skipped_not_weekly_review_day", "calendar_write_attempted": False}) as run:
+        result = cmd_weekly_personal_review_run(_args(planning_date="2026-05-24", live=True, notify=True, notification_dry_run=True, notification_channel_id=None, db_path=None, scheduler_db=None, ledger_path=None, state_file="/tmp/state.json", lock_ttl_seconds=1800, write_audit=False, json_output=True))
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert payload["status"] == "skipped_not_weekly_review_day"
+    run.assert_called_once()
+
+    with patch("rocky_runtime_tools.list_weekly_personal_review_runs", return_value={"status": "ok", "runs": [{"status": "ok"}]}) as recent:
+        result = cmd_weekly_personal_review_recent(_args(limit=5, state_db="/tmp/state.sqlite3", json_output=True))
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert payload["runs"][0]["status"] == "ok"
+    recent.assert_called_once()
+
+    with patch("rocky_runtime_tools.evaluate_weekly_personal_review_readiness", return_value={"status": "ready_verified", "summary": "ready"}) as readiness:
+        result = cmd_weekly_personal_review_readiness(_args(expected_week="2026-W22", now_local=None, state_db="/tmp/state.sqlite3", audit_ledger="/tmp/audit.jsonl", json_output=True))
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert payload["status"] == "ready_verified"
+    readiness.assert_called_once()
+
+    with patch("rocky_runtime_tools.inspect_weekly_calendar_hygiene", return_value={"status": "manual_review_required", "issue_count": 1, "calendar_write_attempted": False}) as hygiene:
+        result = cmd_weekly_calendar_hygiene(_args(start_date="2026-05-25", days=14, calendar_name="Calendar", mark_stale=False, live=False, state_db=None, db_path=None, ledger_path=None, json_output=True))
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert payload["issue_count"] == 1
+    hygiene.assert_called_once()

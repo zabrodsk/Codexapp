@@ -112,6 +112,9 @@ from coding_work_briefing_builder import build_coding_work_briefing
 from coding_work_scheduler import run_coding_work_scheduler
 from daily_personal_briefing_scheduler import explain_daily_priorities, list_daily_personal_briefing_runs, run_daily_personal_briefing, run_daily_personal_briefing_scheduler
 from daily_personal_briefing_readiness import evaluate_daily_personal_briefing_readiness
+from weekly_calendar_hygiene import inspect_weekly_calendar_hygiene
+from weekly_personal_review_scheduler import build_weekly_personal_review, list_weekly_personal_review_runs, run_weekly_personal_review_scheduler
+from weekly_personal_review_readiness import evaluate_weekly_personal_review_readiness
 from daily_priority_arbitrator import arbitrate_daily_priorities
 from email_triage_live_booking import book_email_triage_proposal
 from email_triage_proposal_engine import build_email_triage_proposals
@@ -188,6 +191,12 @@ RUNTIME_DEPLOYABLE_FILES = (
     "scripts/daily_personal_briefing_renderer.py",
     "scripts/daily_personal_briefing_scheduler.py",
     "scripts/daily_personal_briefing_readiness.py",
+    "scripts/weekly_calendar_hygiene.py",
+    "scripts/weekly_personal_signal_collector.py",
+    "scripts/weekly_priority_planner.py",
+    "scripts/weekly_personal_review_renderer.py",
+    "scripts/weekly_personal_review_scheduler.py",
+    "scripts/weekly_personal_review_readiness.py",
     "scripts/email_triage_live_booking.py",
     "scripts/email_triage_proposal_engine.py",
     "scripts/email_triage_reader.py",
@@ -229,6 +238,9 @@ RUNTIME_DEPLOYABLE_FILES = (
     "skills/priority-arbitrator/SKILL.md",
     "skills/preference-models/SKILL.md",
     "skills/outcome-observer/SKILL.md",
+    "skills/weekly-personal-review/SKILL.md",
+    "skills/weekly-priority-planner/SKILL.md",
+    "skills/calendar-hygiene/SKILL.md",
     "scripts/training_calendar_live_booking.py",
     "scripts/training_calendar_proposal_engine.py",
     "scripts/training_calendar_reconciler.py",
@@ -1205,6 +1217,64 @@ def build_parser() -> argparse.ArgumentParser:
     daily_readiness.add_argument("--state-db", dest="state_db")
     daily_readiness.add_argument("--audit-ledger", dest="audit_ledger")
     daily_readiness.add_argument("--json", action="store_true", dest="json_output")
+
+    weekly_review = sub.add_parser(
+        "weekly-personal-review",
+        help="Build Rocky's weekly personal review without Calendar or Notion writes.",
+    )
+    weekly_review.add_argument("--planning-date", dest="planning_date")
+    weekly_review.add_argument("--db-path", dest="db_path")
+    weekly_review.add_argument("--scheduler-db", dest="scheduler_db")
+    weekly_review.add_argument("--json", action="store_true", dest="json_output")
+
+    weekly_scheduler = sub.add_parser(
+        "weekly-personal-review-run",
+        help="Run Rocky's weekly personal review scheduler.",
+    )
+    weekly_scheduler.add_argument("--planning-date", dest="planning_date")
+    weekly_scheduler.add_argument("--live", action="store_true")
+    weekly_scheduler.add_argument("--notify", action="store_true")
+    weekly_scheduler.add_argument("--notification-dry-run", action="store_true", dest="notification_dry_run")
+    weekly_scheduler.add_argument("--notification-channel-id", dest="notification_channel_id")
+    weekly_scheduler.add_argument("--db-path", dest="db_path")
+    weekly_scheduler.add_argument("--scheduler-db", dest="scheduler_db")
+    weekly_scheduler.add_argument("--ledger-path", dest="ledger_path")
+    weekly_scheduler.add_argument("--state-file", default="/Users/clawdbot/.openclaw/state/weekly_personal_review_scheduler.json", dest="state_file")
+    weekly_scheduler.add_argument("--lock-ttl-seconds", type=int, default=1800, dest="lock_ttl_seconds")
+    weekly_scheduler.add_argument("--no-write-audit", action="store_false", dest="write_audit", default=True)
+    weekly_scheduler.add_argument("--json", action="store_true", dest="json_output")
+
+    weekly_recent = sub.add_parser(
+        "weekly-personal-review-recent",
+        help="Show recent sanitized Rocky weekly review scheduler runs.",
+    )
+    weekly_recent.add_argument("--limit", type=int, default=20)
+    weekly_recent.add_argument("--state-db", dest="state_db")
+    weekly_recent.add_argument("--json", action="store_true", dest="json_output")
+
+    weekly_readiness = sub.add_parser(
+        "weekly-personal-review-readiness",
+        help="Read-only production readiness gate for Rocky's weekly personal review natural run.",
+    )
+    weekly_readiness.add_argument("--expected-week", dest="expected_week")
+    weekly_readiness.add_argument("--now-local", dest="now_local")
+    weekly_readiness.add_argument("--state-db", dest="state_db")
+    weekly_readiness.add_argument("--audit-ledger", dest="audit_ledger")
+    weekly_readiness.add_argument("--json", action="store_true", dest="json_output")
+
+    weekly_hygiene = sub.add_parser(
+        "weekly-calendar-hygiene",
+        help="Inspect Rocky weekly calendar hygiene without editing Apple Calendar.",
+    )
+    weekly_hygiene.add_argument("--start-date", dest="start_date")
+    weekly_hygiene.add_argument("--days", type=int, default=14)
+    weekly_hygiene.add_argument("--calendar", default="Calendar", dest="calendar_name")
+    weekly_hygiene.add_argument("--mark-stale", action="store_true", dest="mark_stale")
+    weekly_hygiene.add_argument("--live", action="store_true")
+    weekly_hygiene.add_argument("--state-db", dest="state_db")
+    weekly_hygiene.add_argument("--db-path", dest="db_path")
+    weekly_hygiene.add_argument("--ledger-path", dest="ledger_path")
+    weekly_hygiene.add_argument("--json", action="store_true", dest="json_output")
 
 
     outcomes_collect = sub.add_parser("assistant-outcomes-collect", help="Collect sanitized Rocky assistant outcome observations.")
@@ -3128,6 +3198,86 @@ def cmd_daily_personal_briefing_readiness(args) -> int:
 
 
 
+
+def cmd_weekly_personal_review(args) -> int:
+    payload = build_weekly_personal_review(
+        planning_date=args.planning_date,
+        db_path=args.db_path,
+        scheduler_db_path=args.scheduler_db,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(payload.get("discord_message") or (payload.get("rendered") or {}).get("discord_message") or f"Weekly review: {payload.get('status')}")
+    return 0 if payload.get("status") in {"ok", "degraded"} else 1
+
+
+def cmd_weekly_personal_review_run(args) -> int:
+    payload = run_weekly_personal_review_scheduler(
+        planning_date=args.planning_date,
+        live=args.live,
+        notify=args.notify,
+        notification_dry_run=args.notification_dry_run,
+        notification_channel_id=args.notification_channel_id,
+        db_path=args.db_path,
+        scheduler_db_path=args.scheduler_db,
+        ledger_path=args.ledger_path,
+        state_file=args.state_file,
+        lock_ttl_seconds=args.lock_ttl_seconds,
+        write_audit=args.write_audit,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Weekly personal review: {payload.get('status')} ({payload.get('reason')})")
+    return 0 if payload.get("status") in {"ok", "degraded", "skipped_not_weekly_review_day", "skipped_duplicate_run"} else 1
+
+
+def cmd_weekly_personal_review_recent(args) -> int:
+    payload = list_weekly_personal_review_runs(limit=args.limit, scheduler_db_path=args.state_db)
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Weekly personal review runs: {payload.get('count', 0)}")
+        for run in payload.get("runs") or []:
+            print(f"- {run.get('target_week')} {run.get('status')} {run.get('reason')}")
+    return 0 if payload.get("status") == "ok" else 1
+
+
+def cmd_weekly_personal_review_readiness(args) -> int:
+    payload = evaluate_weekly_personal_review_readiness(
+        expected_week=args.expected_week,
+        now_local=args.now_local,
+        scheduler_db_path=args.state_db,
+        audit_log_path=args.audit_ledger,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(payload.get("summary") or f"Weekly personal review readiness: {payload.get('status')}")
+        for hint in payload.get("recovery_hints") or []:
+            print(f"- {hint}")
+    return 0 if payload.get("status") == "ready_verified" else 1
+
+
+def cmd_weekly_calendar_hygiene(args) -> int:
+    payload = inspect_weekly_calendar_hygiene(
+        start_date=args.start_date,
+        days=args.days,
+        calendar_name=args.calendar_name,
+        mark_stale=args.mark_stale,
+        live=args.live,
+        state_db_path=args.state_db,
+        db_path=args.db_path,
+        ledger_path=args.ledger_path,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Weekly calendar hygiene: {payload.get('status')} issues={payload.get('issue_count', 0)}")
+    return 0 if payload.get("status") in {"ok", "manual_review_required"} else 1
+
+
 def cmd_assistant_outcomes_collect(args) -> int:
     payload = collect_outcomes(
         since_days=args.since_days,
@@ -3939,6 +4089,11 @@ def main() -> int:
         "daily-personal-briefing-run": cmd_daily_personal_briefing_run,
         "daily-personal-briefing-recent": cmd_daily_personal_briefing_recent,
         "daily-personal-briefing-readiness": cmd_daily_personal_briefing_readiness,
+        "weekly-personal-review": cmd_weekly_personal_review,
+        "weekly-personal-review-run": cmd_weekly_personal_review_run,
+        "weekly-personal-review-recent": cmd_weekly_personal_review_recent,
+        "weekly-personal-review-readiness": cmd_weekly_personal_review_readiness,
+        "weekly-calendar-hygiene": cmd_weekly_calendar_hygiene,
         "task-command-apply": cmd_task_command_apply,
         "task-command-capture-run": cmd_task_command_capture_run,
         "task-command-recent": cmd_task_command_recent,

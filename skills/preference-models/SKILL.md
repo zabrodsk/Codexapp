@@ -21,3 +21,7 @@ Use this skill when Rocky updates or previews self-learning preferences.
 /Users/clawdbot/.openclaw/workspace/.venv/bin/python scripts/rocky_runtime_tools.py \
   assistant-learning-summary --json
 ```
+
+## Weekly Review Boundary
+
+Weekly review may summarize learning calibration and recommend preference adjustments. It must not activate review-only proposals or expand learning authority; bounded active preferences remain limited to the Sprint 10 rules.

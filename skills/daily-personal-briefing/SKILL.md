@@ -41,3 +41,7 @@ Production readiness is checked with `daily-personal-briefing-readiness --expect
 ## Learning Context
 
 The daily brief may surface active bounded preferences, recent outcome counts, and review-only learning proposals. It must not expose raw source content or imply that review-only proposals are already active.
+
+## Weekly Review Boundary
+
+The weekly personal review is a separate Monday week-ahead summary and recommendation lane. Daily briefing may mention weekly-review readiness or recent weekly recommendations, but it remains the same-day chief-of-staff surface and should not inherit new booking authority from weekly review.

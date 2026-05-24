@@ -32,6 +32,8 @@ from assistant_scheduler_health import (
     ASSISTANT_LEARNING_DIRECT_PROGRAM_ARGUMENTS,
     ASSISTANT_LEARNING_SPEC,
     ASSISTANT_LEARNING_SSH_BRIDGE_PROGRAM_ARGUMENTS,
+    WEEKLY_PERSONAL_REVIEW_SPEC,
+    WEEKLY_PERSONAL_REVIEW_SSH_BRIDGE_PROGRAM_ARGUMENTS,
     TRAINING_CALENDAR_DIRECT_PROGRAM_ARGUMENTS,
     TRAINING_CALENDAR_BOOKING_SPEC,
     TRAINING_CALENDAR_SSH_BRIDGE_PROGRAM_ARGUMENTS,
@@ -742,3 +744,15 @@ def test_assistant_learning_health_fails_missing_natural_run_after_grace(tmp_pat
     assert payload["status"] == "degraded"
     assert payload["signals"]["natural_run"]["status"] == "natural_run_failed"
     assert payload["failure_class"] == "assistant_learning_natural_run_failed"
+
+
+def test_weekly_personal_review_launchagent_spec_matches_production_schedule():
+    spec = WEEKLY_PERSONAL_REVIEW_SPEC
+
+    assert spec.job_name == "weekly_personal_review"
+    assert spec.launchagent.label == "com.openclaw.rocky-weekly-personal-review"
+    assert spec.launchagent.weekdays == [1]
+    assert spec.launchagent.hour == 7
+    assert spec.launchagent.minute == 15
+    assert launchagent_execution_mode(WEEKLY_PERSONAL_REVIEW_SSH_BRIDGE_PROGRAM_ARGUMENTS) == "localhost_ssh_bridge"
+    assert "weekly_personal_review" in JOB_REGISTRY

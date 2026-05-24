@@ -126,6 +126,22 @@ ASSISTANT_LEARNING_DIRECT_PROGRAM_ARGUMENTS = [
     "--notify-failures",
     "--json",
 ]
+WEEKLY_PERSONAL_REVIEW_SSH_BRIDGE_PROGRAM_ARGUMENTS = [
+    "/usr/bin/ssh",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "StrictHostKeyChecking=accept-new",
+    "localhost",
+    "cd /Users/clawdbot/.openclaw/workspace && /Users/clawdbot/.openclaw/workspace/.venv/bin/python scripts/weekly_personal_review_scheduler.py --live --notify --json",
+]
+WEEKLY_PERSONAL_REVIEW_DIRECT_PROGRAM_ARGUMENTS = [
+    "/Users/clawdbot/.openclaw/workspace/.venv/bin/python",
+    "/Users/clawdbot/.openclaw/workspace/scripts/weekly_personal_review_scheduler.py",
+    "--live",
+    "--notify",
+    "--json",
+]
 
 
 @dataclass(frozen=True)
@@ -327,6 +343,27 @@ ASSISTANT_LEARNING_SPEC = SchedulerJobSpec(
     first_expected_run_after="2026-05-25T20:45:00+02:00",
 )
 
+WEEKLY_PERSONAL_REVIEW_SPEC = SchedulerJobSpec(
+    job_name="weekly_personal_review",
+    job_label="Rocky weekly personal review",
+    workflow="weekly_personal_review_scheduler",
+    launchagent=LaunchAgentSpec(
+        label="com.openclaw.rocky-weekly-personal-review",
+        plist_path="/Users/clawdbot/Library/LaunchAgents/com.openclaw.rocky-weekly-personal-review.plist",
+        program_arguments=WEEKLY_PERSONAL_REVIEW_SSH_BRIDGE_PROGRAM_ARGUMENTS,
+        working_directory="/Users/clawdbot/.openclaw/workspace",
+        stdout_path="/Users/clawdbot/.openclaw/logs/rocky-weekly-personal-review.log",
+        stderr_path="/Users/clawdbot/.openclaw/logs/rocky-weekly-personal-review.err.log",
+        weekdays=[1],
+        hour=7,
+        minute=15,
+        timezone="Europe/Prague",
+        first_expected_run_after="2026-05-25T07:15:00+02:00",
+    ),
+    state_path="/Users/clawdbot/.openclaw/state/weekly_personal_review_scheduler.json",
+    first_expected_run_after="2026-05-25T07:15:00+02:00",
+)
+
 JOB_REGISTRY = {
     BETTY_MAIL_TRIAGE_SPEC.job_name: BETTY_MAIL_TRIAGE_SPEC,
     TRAINING_CALENDAR_BOOKING_SPEC.job_name: TRAINING_CALENDAR_BOOKING_SPEC,
@@ -336,6 +373,7 @@ JOB_REGISTRY = {
     TASK_COMMAND_CAPTURE_SPEC.job_name: TASK_COMMAND_CAPTURE_SPEC,
     DAILY_PERSONAL_BRIEFING_SPEC.job_name: DAILY_PERSONAL_BRIEFING_SPEC,
     ASSISTANT_LEARNING_SPEC.job_name: ASSISTANT_LEARNING_SPEC,
+    WEEKLY_PERSONAL_REVIEW_SPEC.job_name: WEEKLY_PERSONAL_REVIEW_SPEC,
 }
 
 
@@ -486,6 +524,23 @@ def launchagent_execution_mode(program_arguments: list[str]) -> str:
         and "--json" in program_arguments
     ):
         return "direct_launchd_python"
+    if (
+        program_arguments[:1] == ["/usr/bin/ssh"]
+        and "localhost" in program_arguments
+        and "weekly_personal_review_scheduler.py --live" in joined
+        and "--notify" in joined
+        and "--json" in joined
+    ):
+        return "localhost_ssh_bridge"
+    if (
+        program_arguments
+        and program_arguments[0].endswith("/python")
+        and any(arg.endswith("weekly_personal_review_scheduler.py") for arg in program_arguments)
+        and "--live" in program_arguments
+        and "--notify" in program_arguments
+        and "--json" in program_arguments
+    ):
+        return "direct_launchd_python"
     return "custom"
 
 
@@ -621,6 +676,7 @@ def _helper_state(spec: SchedulerJobSpec) -> dict[str, Any]:
         "last_run_at",
         "last_status",
         "target_date",
+        "target_week",
         "idempotency_key",
         "run_idempotency_key",
         "reason",
@@ -820,7 +876,7 @@ def evaluate_scheduler_job(
                     "summary": f"{spec.job_label} LaunchAgent uses the localhost SSH bridge, but localhost SSH is unavailable.",
                 }
             )
-    if spec.job_name in {"training_calendar_booking", "email_triage_booking", "task_spine", "coding_work_briefing", "task_command_capture", "daily_personal_briefing", "assistant_learning"}:
+    if spec.job_name in {"training_calendar_booking", "email_triage_booking", "task_spine", "coding_work_briefing", "task_command_capture", "daily_personal_briefing", "assistant_learning", "weekly_personal_review"}:
         if execution_mode == "localhost_ssh_bridge":
             pass
         elif execution_mode == "custom":
@@ -925,7 +981,7 @@ def evaluate_scheduler_job(
                 "summary": proxy_state.get("summary") or "Helper state is degraded.",
             }
         )
-    if spec.job_name in {"training_calendar_booking", "email_triage_booking", "task_spine", "coding_work_briefing", "task_command_capture", "daily_personal_briefing", "assistant_learning"}:
+    if spec.job_name in {"training_calendar_booking", "email_triage_booking", "task_spine", "coding_work_briefing", "task_command_capture", "daily_personal_briefing", "assistant_learning", "weekly_personal_review"}:
         helper_payload = proxy_state.get("state") or {}
         if helper_payload.get("error_hash"):
             issues.append(
