@@ -98,6 +98,8 @@ from assistant_preference_models import learning_summary
 from assistant_learning_scheduler import run_assistant_learning_scheduler
 from assistant_learning_calibration_review import build_assistant_learning_calibration_review
 from assistant_learning_readiness import evaluate_assistant_learning_readiness
+from assistant_production_readiness import build_assistant_production_readiness
+from assistant_safe_recovery import run_safe_recovery_action
 from assistant_codex_llm import task_llm_health
 from assistant_notification_dispatcher import dispatch_failure_notification
 from assistant_run_lock import smoke_lock_cycle
@@ -178,6 +180,8 @@ RUNTIME_DEPLOYABLE_FILES = (
     "scripts/assistant_learning_store.py",
     "scripts/assistant_learning_calibration_review.py",
     "scripts/assistant_learning_readiness.py",
+    "scripts/assistant_production_readiness.py",
+    "scripts/assistant_safe_recovery.py",
     "scripts/coding_signal_sync.py",
     "scripts/coding_session_inspector.py",
     "scripts/coding_repo_inspector.py",
@@ -241,6 +245,8 @@ RUNTIME_DEPLOYABLE_FILES = (
     "skills/weekly-personal-review/SKILL.md",
     "skills/weekly-priority-planner/SKILL.md",
     "skills/calendar-hygiene/SKILL.md",
+    "skills/production-readiness/SKILL.md",
+    "skills/safe-recovery/SKILL.md",
     "scripts/training_calendar_live_booking.py",
     "scripts/training_calendar_proposal_engine.py",
     "scripts/training_calendar_reconciler.py",
@@ -1359,6 +1365,36 @@ def build_parser() -> argparse.ArgumentParser:
     agentmail_health.add_argument("--run-tests", action="store_true", help="Run tracked Node tests as part of health.")
     agentmail_health.add_argument("--no-launchctl", action="store_false", dest="read_launchctl", default=True)
     agentmail_health.add_argument("--json", action="store_true", dest="json_output")
+
+    production_readiness = sub.add_parser(
+        "assistant-production-readiness",
+        help="Run Rocky's read-only production readiness rollup across assistant lanes.",
+    )
+    production_readiness.add_argument("--expected-date", dest="expected_date")
+    production_readiness.add_argument("--expected-week", dest="expected_week")
+    production_readiness.add_argument("--now-local", dest="now_local")
+    production_readiness.add_argument("--state-db", dest="state_db")
+    production_readiness.add_argument("--calendar-state-db", dest="calendar_state_db")
+    production_readiness.add_argument("--learning-db", dest="learning_db")
+    production_readiness.add_argument("--audit-ledger", dest="audit_ledger")
+    production_readiness.add_argument("--calendar-db-path", dest="calendar_db_path")
+    production_readiness.add_argument("--json", action="store_true", dest="json_output")
+
+    safe_recovery = sub.add_parser(
+        "assistant-safe-recovery",
+        help="List or apply Rocky state-only safe recovery actions.",
+    )
+    safe_recovery.add_argument("--action", choices=["mark-calendar-stale", "update-dead-letter"])
+    safe_recovery.add_argument("--idempotency-key", dest="idempotency_key")
+    safe_recovery.add_argument("--dead-letter-id", dest="dead_letter_id")
+    safe_recovery.add_argument("--status", choices=["recovered", "acknowledged", "ignored"])
+    safe_recovery.add_argument("--calendar", default="Calendar", dest="calendar_name")
+    safe_recovery.add_argument("--state-db", dest="state_db")
+    safe_recovery.add_argument("--calendar-state-db", dest="calendar_state_db")
+    safe_recovery.add_argument("--calendar-db-path", dest="calendar_db_path")
+    safe_recovery.add_argument("--audit-ledger", dest="audit_ledger")
+    safe_recovery.add_argument("--live", action="store_true")
+    safe_recovery.add_argument("--json", action="store_true", dest="json_output")
 
     scheduler_health = sub.add_parser(
         "assistant-scheduler-health",
@@ -3812,6 +3848,50 @@ def cmd_agentmail_bridge_health(args) -> int:
     return 0 if payload.get("status") in {"ok", "degraded"} else 1
 
 
+def cmd_assistant_production_readiness(args) -> int:
+    payload = build_assistant_production_readiness(
+        expected_date=args.expected_date,
+        expected_week=args.expected_week,
+        now_local=args.now_local,
+        scheduler_db_path=args.state_db,
+        calendar_state_db_path=args.calendar_state_db,
+        learning_db_path=args.learning_db,
+        audit_log_path=args.audit_ledger,
+        calendar_db_path=args.calendar_db_path,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(payload.get("summary"))
+        print(f"Status: {payload.get('status')}")
+    return 0 if payload.get("status") in {"ready_verified", "ready_pending_natural_runs", "manual_review_required"} else 1
+
+
+def cmd_assistant_safe_recovery(args) -> int:
+    payload = run_safe_recovery_action(
+        action=args.action,
+        idempotency_key=args.idempotency_key,
+        dead_letter_id=args.dead_letter_id,
+        status=args.status,
+        live=args.live,
+        scheduler_db_path=args.state_db,
+        calendar_state_db_path=args.calendar_state_db,
+        audit_log_path=args.audit_ledger,
+        calendar_db_path=args.calendar_db_path,
+        calendar_name=args.calendar_name,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        if args.action:
+            print(f"Assistant safe recovery: {payload.get('status')} ({payload.get('reason')})")
+        else:
+            print(f"Assistant safe recovery candidates: {payload.get('candidate_count', 0)}")
+            for item in payload.get("candidates", [])[:10]:
+                print(f"- {item.get('kind')}: {item.get('status')} {item.get('suggested_command')}")
+    return 0 if payload.get("status") in {"ok", "recovery_available", "manual_review_required", "recovered"} else 1
+
+
 def cmd_assistant_scheduler_health(args) -> int:
     payload = evaluate_all_scheduler_jobs(
         job_name=args.job,
@@ -4109,6 +4189,8 @@ def main() -> int:
         "assistant-learning-calibration-review": cmd_assistant_learning_calibration_review,
         "assistant-notification-dispatch": cmd_assistant_notification_dispatch,
         "agentmail-bridge-health": cmd_agentmail_bridge_health,
+        "assistant-production-readiness": cmd_assistant_production_readiness,
+        "assistant-safe-recovery": cmd_assistant_safe_recovery,
         "assistant-scheduler-health": cmd_assistant_scheduler_health,
         "assistant-dead-letters": cmd_assistant_dead_letters,
         "assistant-lock-smoke": cmd_assistant_lock_smoke,

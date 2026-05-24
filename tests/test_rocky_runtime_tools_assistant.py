@@ -69,6 +69,8 @@ from rocky_runtime_tools import (
     cmd_assistant_learning_scheduler_run,
     cmd_assistant_learning_readiness,
     cmd_assistant_learning_calibration_review,
+    cmd_assistant_production_readiness,
+    cmd_assistant_safe_recovery,
 )
 
 
@@ -194,6 +196,9 @@ def test_parser_includes_assistant_commands():
     assert parser.parse_args(["assistant-learning-scheduler-run"]).command == "assistant-learning-scheduler-run"
     assert parser.parse_args(["assistant-learning-readiness", "--expected-date", "2026-05-25"]).command == "assistant-learning-readiness"
     assert parser.parse_args(["assistant-learning-calibration-review"]).command == "assistant-learning-calibration-review"
+    assert parser.parse_args(["assistant-production-readiness", "--expected-date", "2026-05-25", "--expected-week", "2026-W22"]).command == "assistant-production-readiness"
+    assert parser.parse_args(["assistant-safe-recovery"]).command == "assistant-safe-recovery"
+    assert parser.parse_args(["assistant-safe-recovery", "--action", "mark-calendar-stale", "--idempotency-key", "rocky:test", "--live"]).command == "assistant-safe-recovery"
     assert parser.parse_args(["task-command-apply", "--text", "remember this"]).command == "task-command-apply"
     assert parser.parse_args(["task-command-capture-run"]).command == "task-command-capture-run"
     assert parser.parse_args(["task-command-recent"]).command == "task-command-recent"
@@ -214,6 +219,27 @@ def test_assistant_learning_readiness_runtime_command_is_wired(capsys):
     assert result == 0
     assert payload["status"] == "calibration_pending"
     assert payload["calendar_write_attempted"] is False
+
+
+def test_assistant_production_readiness_runtime_command_is_wired(capsys):
+    with patch("rocky_runtime_tools.build_assistant_production_readiness", return_value={"status": "ready_pending_natural_runs", "summary": "waiting", "calendar_write_attempted": False}):
+        result = cmd_assistant_production_readiness(_args(expected_date="2026-05-25", expected_week="2026-W22", now_local=None, state_db=None, calendar_state_db=None, learning_db=None, audit_ledger=None, calendar_db_path=None, json_output=True))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert payload["status"] == "ready_pending_natural_runs"
+    assert payload["calendar_write_attempted"] is False
+
+
+def test_assistant_safe_recovery_runtime_command_is_wired(capsys):
+    with patch("rocky_runtime_tools.run_safe_recovery_action", return_value={"status": "blocked", "reason": "live_flag_required", "calendar_write_attempted": False}):
+        result = cmd_assistant_safe_recovery(_args(action="update-dead-letter", idempotency_key=None, dead_letter_id="dead:1", status="recovered", live=False, state_db=None, calendar_state_db=None, audit_ledger=None, calendar_db_path=None, calendar_name="Calendar", json_output=True))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 1
+    assert payload["reason"] == "live_flag_required"
+    assert payload["calendar_write_attempted"] is False
+
 
 def test_agentmail_bridge_health_runtime_command_is_wired(capsys):
     with patch("rocky_runtime_tools.build_agentmail_bridge_health", return_value={"status": "ok", "recommendation": "none", "files": [], "secrets_included": False}):
@@ -919,8 +945,12 @@ def test_runtime_deployable_files_include_training_calendar_modules():
     assert "scripts/assistant_learning_scheduler.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/assistant_learning_readiness.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/assistant_learning_calibration_review.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/assistant_production_readiness.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/assistant_safe_recovery.py" in RUNTIME_DEPLOYABLE_FILES
     assert "skills/outcome-observer/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
     assert "skills/preference-models/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
+    assert "skills/production-readiness/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
+    assert "skills/safe-recovery/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
     assert "skills/coding-session-inspector/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
     assert "skills/coding-memory-enricher/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
     assert "skills/coding-work-briefing/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
