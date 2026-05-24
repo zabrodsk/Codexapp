@@ -56,6 +56,12 @@ from rocky_runtime_tools import (
     cmd_agentmail_bridge_health,
     cmd_trainingpeaks_ics_preview,
     cmd_trainingpeaks_read_path_check,
+    cmd_assistant_outcomes_collect,
+    cmd_assistant_learning_summary,
+    cmd_assistant_preferences_show,
+    cmd_assistant_learning_proposals,
+    cmd_assistant_learning_apply,
+    cmd_assistant_learning_scheduler_run,
 )
 
 
@@ -168,6 +174,12 @@ def test_parser_includes_assistant_commands():
     assert parser.parse_args(["daily-personal-briefing-run", "--live", "--notify", "--apply-safe-bookings"]).command == "daily-personal-briefing-run"
     assert parser.parse_args(["daily-personal-briefing-recent"]).command == "daily-personal-briefing-recent"
     assert parser.parse_args(["daily-personal-briefing-readiness", "--expected-date", "2026-05-25"]).command == "daily-personal-briefing-readiness"
+    assert parser.parse_args(["assistant-outcomes-collect"]).command == "assistant-outcomes-collect"
+    assert parser.parse_args(["assistant-learning-summary"]).command == "assistant-learning-summary"
+    assert parser.parse_args(["assistant-preferences-show"]).command == "assistant-preferences-show"
+    assert parser.parse_args(["assistant-learning-proposals"]).command == "assistant-learning-proposals"
+    assert parser.parse_args(["assistant-learning-apply", "--proposal-id", "learning-proposal:1"]).command == "assistant-learning-apply"
+    assert parser.parse_args(["assistant-learning-scheduler-run"]).command == "assistant-learning-scheduler-run"
     assert parser.parse_args(["task-command-apply", "--text", "remember this"]).command == "task-command-apply"
     assert parser.parse_args(["task-command-capture-run"]).command == "task-command-capture-run"
     assert parser.parse_args(["task-command-recent"]).command == "task-command-recent"
@@ -877,6 +889,12 @@ def test_runtime_deployable_files_include_training_calendar_modules():
     assert "scripts/daily_personal_briefing_renderer.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/daily_personal_briefing_scheduler.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/daily_personal_briefing_readiness.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/assistant_learning_store.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/assistant_outcome_observer.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/assistant_preference_models.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/assistant_learning_scheduler.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "skills/outcome-observer/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
+    assert "skills/preference-models/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
     assert "skills/coding-session-inspector/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
     assert "skills/coding-memory-enricher/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
     assert "skills/coding-work-briefing/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
@@ -1115,3 +1133,15 @@ def test_task_spine_scheduler_cli_uses_scheduler_engine(tmp_path, capsys):
     assert payload["status"] == "ok"
     scheduler.assert_called_once()
     assert scheduler.call_args.kwargs["live"] is True
+
+
+def test_assistant_learning_runtime_commands(tmp_path, capsys):
+    assert cmd_assistant_outcomes_collect(_args(since_days=7, live=False, learning_db=str(tmp_path / "learning.sqlite3"), scheduler_db=str(tmp_path / "scheduler.sqlite3"), calendar_state_db=str(tmp_path / "calendar.sqlite3"), ledger_path=str(tmp_path / "audit.jsonl"), write_audit=False, json_output=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["calendar_write_attempted"] is False
+
+    assert cmd_assistant_learning_summary(_args(learning_db=str(tmp_path / "learning.sqlite3"), json_output=True)) == 0
+    assert cmd_assistant_preferences_show(_args(learning_db=str(tmp_path / "learning.sqlite3"), json_output=True)) == 0
+    assert cmd_assistant_learning_proposals(_args(learning_db=str(tmp_path / "learning.sqlite3"), status="all", limit=10, json_output=True)) == 0
+    assert cmd_assistant_learning_apply(_args(proposal_id="missing", learning_db=str(tmp_path / "learning.sqlite3"), ledger_path=str(tmp_path / "audit.jsonl"), live=False, json_output=True)) == 2
+    assert cmd_assistant_learning_scheduler_run(_args(planning_date="2026-05-25", since_days=7, live=False, notify_failures=False, notification_dry_run=False, notification_channel_id=None, learning_db=str(tmp_path / "learning.sqlite3"), scheduler_db=str(tmp_path / "scheduler.sqlite3"), calendar_state_db=str(tmp_path / "calendar.sqlite3"), ledger_path=str(tmp_path / "audit.jsonl"), state_file=str(tmp_path / "state.json"), lock_ttl_seconds=1800, write_audit=False, json_output=True)) == 0

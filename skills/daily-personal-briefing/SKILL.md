@@ -11,7 +11,7 @@ Use this skill when Rocky prepares the workday chief-of-staff briefing for Dusan
 
 Inputs are sanitized lane summaries: Apple Calendar events without raw descriptions, TrainingPeaks/training scheduler state, email triage counts and estimates, Notion task summaries, task command ledger summaries, coding briefing summaries, scheduler state, and dead-letter summaries.
 
-Outputs are a concise Discord-ready briefing with these sections: Today, Do first, Protected time, Needs decision, Blocked or risky, Suggested focus, Deferred / did not fit, and What Rocky handled. The Discord-facing message must preserve section line breaks end to end.
+Outputs are a concise Discord-ready briefing with these sections: Today, Do first, Protected time, Needs decision, Blocked or risky, Suggested focus, Deferred / did not fit, What Rocky handled, and when useful a compact Rocky is learning summary. The Discord-facing message must preserve section line breaks end to end.
 
 Operator visibility includes `daily-personal-briefing-recent --json`, which shows sanitized recent run history from the assistant scheduler state store.
 Production readiness is checked with `daily-personal-briefing-readiness --expected-date YYYY-MM-DD --json`, which verifies the natural LaunchAgent run, notification, logs, state, dead letters, audit evidence, and calendar side effects without writing anything.
@@ -36,3 +36,8 @@ Production readiness is checked with `daily-personal-briefing-readiness --expect
 /Users/clawdbot/.openclaw/workspace/.venv/bin/python scripts/rocky_runtime_tools.py \
   daily-personal-briefing-readiness --expected-date 2026-05-25 --json
 ```
+
+
+## Learning Context
+
+The daily brief may surface active bounded preferences, recent outcome counts, and review-only learning proposals. It must not expose raw source content or imply that review-only proposals are already active.

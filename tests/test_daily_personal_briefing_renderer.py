@@ -56,3 +56,13 @@ def test_discord_briefing_preserves_section_line_breaks():
     assert "\nDo first\n" in message
     assert "\nDeferred / did not fit\n" in message
     assert "Rocky daily brief - 2026-05-25\n\nToday\n" in message
+
+
+def test_daily_briefing_renders_learning_summary():
+    payload = render_daily_personal_briefing(
+        {"planning_date": "2026-05-25", "calendar": {"event_count": 0, "free_windows": []}, "learning": {"status": "ok", "active_bounded_count": 1, "proposal_count": 2, "outcome_count": 7}},
+        {"top_priority": {"category": "task", "title": "Focus"}, "do_first": [], "protected_time": [], "needs_decision": [], "blocked_or_risky": [], "suggested_focus": [], "deferred_or_did_not_fit": [], "what_rocky_handled": []},
+    )
+
+    assert "Rocky is learning" in payload["discord_message"]
+    assert "1 bounded preference" in payload["discord_message"]

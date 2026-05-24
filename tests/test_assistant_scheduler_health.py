@@ -29,6 +29,9 @@ from assistant_scheduler_health import (
     DAILY_PERSONAL_BRIEFING_DIRECT_PROGRAM_ARGUMENTS,
     DAILY_PERSONAL_BRIEFING_SPEC,
     DAILY_PERSONAL_BRIEFING_SSH_BRIDGE_PROGRAM_ARGUMENTS,
+    ASSISTANT_LEARNING_DIRECT_PROGRAM_ARGUMENTS,
+    ASSISTANT_LEARNING_SPEC,
+    ASSISTANT_LEARNING_SSH_BRIDGE_PROGRAM_ARGUMENTS,
     TRAINING_CALENDAR_DIRECT_PROGRAM_ARGUMENTS,
     TRAINING_CALENDAR_BOOKING_SPEC,
     TRAINING_CALENDAR_SSH_BRIDGE_PROGRAM_ARGUMENTS,
@@ -606,3 +609,19 @@ def test_task_spine_health_reports_degraded_llm_from_state(tmp_path):
     assert payload["status"] == "degraded"
     assert payload["failure_class"] == "task_llm_degraded"
     assert payload["signals"]["task_llm"]["reason"] == "task_llm_model_failed"
+
+
+def test_assistant_learning_launchagent_spec_matches_production_schedule():
+    spec = ASSISTANT_LEARNING_SPEC
+
+    assert JOB_REGISTRY["assistant_learning"] is spec
+    assert spec.workflow == "assistant_learning_scheduler"
+    assert spec.launchagent.label == "com.openclaw.rocky-assistant-learning"
+    assert spec.launchagent.program_arguments == ASSISTANT_LEARNING_SSH_BRIDGE_PROGRAM_ARGUMENTS
+    assert "assistant_learning_scheduler.py --live --notify-failures --json" in " ".join(spec.launchagent.program_arguments)
+    assert launchagent_execution_mode(spec.launchagent.program_arguments) == "localhost_ssh_bridge"
+    assert launchagent_execution_mode(ASSISTANT_LEARNING_DIRECT_PROGRAM_ARGUMENTS) == "direct_launchd_python"
+    assert spec.launchagent.weekdays == [1, 2, 3, 4, 5]
+    assert spec.launchagent.hour == 20
+    assert spec.launchagent.minute == 45
+    assert spec.state_path == "/Users/clawdbot/.openclaw/state/assistant_learning_scheduler.json"

@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from apple_calendar_cli import DEFAULT_DB_PATH, query_events
 from assistant_calendar_dry_run import build_calendar_dry_run
+from assistant_preference_models import active_coding_default_duration
 from coding_work_briefing_builder import build_coding_work_briefing
 
 
@@ -31,8 +32,12 @@ def build_coding_focus_proposals(
     write_audit: bool = True,
     existing_events: list[dict[str, Any]] | None = None,
     max_blocks: int = MAX_BLOCKS,
+    learning_db_path: str | Path | None = None,
+    preferences: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     planning_day = _parse_date(planning_date) if planning_date else datetime.now(ZoneInfo(TIMEZONE)).date()
+    learning_pref = active_coding_default_duration(db_path=learning_db_path, preferences=preferences)
+    learned_default_duration = int((learning_pref or {}).get("value") or DEFAULT_DURATION_MINUTES)
     base = {
         "mode": "dry_run",
         "planning_date": planning_day.isoformat(),
@@ -40,6 +45,7 @@ def build_coding_focus_proposals(
         "timezone": TIMEZONE,
         "calendar_write_attempted": False,
         "proposals": [],
+        "learning_preference": learning_pref,
     }
     if planning_day.weekday() >= 4:
         return {**base, "status": "skipped_weekend_target", "reason": "proactive_booking_blocked_on_friday_saturday_sunday"}
@@ -63,7 +69,7 @@ def build_coding_focus_proposals(
     total_minutes = 0
     working_events = list(day_events)
     for item in eligible[: max(1, int(max_blocks))]:
-        duration = _duration_for_item(item, remaining=max(0, MAX_TOTAL_MINUTES - total_minutes))
+        duration = _duration_for_item(item, remaining=max(0, MAX_TOTAL_MINUTES - total_minutes), default_duration_minutes=learned_default_duration)
         if duration < 60:
             break
         proposal = _proposal_for_item(
@@ -218,8 +224,8 @@ def _has_ambiguous_tie(items: list[dict[str, Any]]) -> bool:
     return len({(item.get("priority"), item.get("confidence")) for item in top}) == 1
 
 
-def _duration_for_item(item: dict[str, Any], *, remaining: int) -> int:
-    requested = int(item.get("estimated_effort_minutes") or DEFAULT_DURATION_MINUTES)
+def _duration_for_item(item: dict[str, Any], *, remaining: int, default_duration_minutes: int = DEFAULT_DURATION_MINUTES) -> int:
+    requested = int(item.get("estimated_effort_minutes") or default_duration_minutes)
     duration = max(60, min(120, requested, remaining or requested))
     return ((duration + 14) // 15) * 15
 

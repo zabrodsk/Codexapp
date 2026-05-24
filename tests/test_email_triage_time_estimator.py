@@ -34,3 +34,15 @@ def test_attention_email_estimate_caps_at_90_minutes():
 
     assert estimate["estimated_minutes"] == 90
     assert estimate["maximum_minutes"] == 90
+
+
+def test_email_estimate_applies_bounded_learning_multiplier():
+    estimate = estimate_email_triage_minutes(
+        {"attention_count": 8, "priority_buckets": {"soon": 4, "later": 4}},
+        preferences={"email_triage.duration_multiplier": {"status": "active_bounded", "value": 1.25, "confidence": 0.8}},
+    )
+
+    assert estimate["raw_estimated_minutes"] == 64
+    assert estimate["adjusted_raw_estimated_minutes"] == 80
+    assert estimate["estimated_minutes"] == 90
+    assert estimate["learning_preference"]["preference_key"] == "email_triage.duration_multiplier"

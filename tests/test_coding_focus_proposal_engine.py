@@ -117,3 +117,32 @@ def test_calendar_conflict_blocks_when_no_available_slot():
 
     assert payload["status"] == "blocked"
     assert payload["proposals"][0]["reason"] == "no_available_slot"
+
+
+def test_coding_focus_uses_bounded_learning_default_duration():
+    item = _item()
+    item.pop("estimated_effort_minutes", None)
+    payload = build_coding_focus_proposals(
+        planning_date="2026-05-25",
+        work_items=[item],
+        existing_events=[],
+        write_audit=False,
+        preferences={"coding_focus.default_duration_minutes": {"status": "active_bounded", "value": 120, "confidence": 0.8}},
+    )
+
+    assert payload["status"] == "proposal"
+    assert payload["proposals"][0]["duration_minutes"] == 120
+    assert payload["learning_preference"]["preference_key"] == "coding_focus.default_duration_minutes"
+
+def test_coding_focus_learning_never_overrides_weekend_policy():
+    item = _item()
+    item.pop("estimated_effort_minutes", None)
+    payload = build_coding_focus_proposals(
+        planning_date="2026-05-23",
+        work_items=[item],
+        existing_events=[],
+        write_audit=False,
+        preferences={"coding_focus.default_duration_minutes": {"status": "active_bounded", "value": 120, "confidence": 0.8}},
+    )
+
+    assert payload["status"] == "skipped_weekend_target"

@@ -42,6 +42,9 @@ def render_daily_personal_briefing(signals: dict[str, Any], arbitration: dict[st
         "What Rocky handled",
         *_plain_bullets(arbitration.get("what_rocky_handled") or [], empty="No autonomous actions completed in this brief."),
     ]
+    learning_lines = _learning_lines(signals.get("learning") or {})
+    if learning_lines:
+        lines.extend(["", "Rocky is learning", *learning_lines])
     actions = arbitration.get("safe_booking_actions") or []
     if actions:
         lines.extend(["", "Safe booking actions", *_plain_bullets([f"{item.get('action')}: {item.get('idempotency_key')}" for item in actions], empty="none")])
@@ -103,3 +106,21 @@ def _safe_text(value: Any, limit: int | None = None) -> str:
     if limit:
         return text[:limit]
     return text
+
+
+def _learning_lines(learning: dict[str, Any]) -> list[str]:
+    if not learning or learning.get("status") in {"empty", "skipped"}:
+        return []
+    active = int(learning.get("active_bounded_count") or 0)
+    proposals = int(learning.get("proposal_count") or 0)
+    outcomes = int(learning.get("outcome_count") or 0)
+    if active <= 0 and proposals <= 0 and outcomes <= 0:
+        return []
+    parts = []
+    if active:
+        parts.append(f"{active} bounded preference(s) active")
+    if proposals:
+        parts.append(f"{proposals} learning proposal(s) for review")
+    if outcomes:
+        parts.append(f"{outcomes} recent outcome(s) observed")
+    return ["- " + _safe_text("; ".join(parts), 220)]

@@ -7,6 +7,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from daily_personal_signal_collector import collect_daily_personal_signals
+from assistant_learning_store import AssistantLearningStore
 
 
 def test_collects_sanitized_lane_snapshot_without_mutation(tmp_path):
@@ -91,3 +92,24 @@ def test_friday_briefing_is_not_booking_allowed():
     assert payload["is_weekday_briefing_day"] is True
     assert payload["booking_allowed_today"] is False
     assert payload["booking_policy_reason"] == "proactive_booking_blocked_on_friday_saturday_sunday"
+
+
+def test_daily_signals_include_learning_summary(tmp_path):
+    store = AssistantLearningStore(tmp_path / "learning.sqlite3")
+    store.record_outcome({"lane": "email_triage", "outcome_type": "duration", "source_ref": "x", "outcome_status": "observed", "safe_summary": "observed"})
+    payload = collect_daily_personal_signals(
+        planning_date="2026-05-25",
+        calendar_events=[],
+        scheduler_states={},
+        email_payload={},
+        task_payload={"status": "ok", "tasks": []},
+        coding_payload={"status": "ok", "selected_focus_items": [], "work_items": []},
+        coding_proposals_payload={"status": "skipped_no_coding_focus", "proposals": []},
+        task_focus_payload={},
+        command_payload={"commands": []},
+        dead_letters=[],
+        learning_db_path=tmp_path / "learning.sqlite3",
+    )
+
+    assert payload["learning"]["outcome_count"] == 1
+    assert payload["calendar_write_attempted"] is False

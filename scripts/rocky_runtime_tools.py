@@ -92,6 +92,10 @@ from assistant_calendar_status import (
 )
 from assistant_calendar_tcc_probe import build_calendar_tcc_probe
 from assistant_calendar_writer import create_calendar_block, delete_calendar_block
+from assistant_learning_store import AssistantLearningStore
+from assistant_outcome_observer import collect_outcomes
+from assistant_preference_models import learning_summary
+from assistant_learning_scheduler import run_assistant_learning_scheduler
 from assistant_codex_llm import task_llm_health
 from assistant_notification_dispatcher import dispatch_failure_notification
 from assistant_run_lock import smoke_lock_cycle
@@ -163,6 +167,10 @@ RUNTIME_DEPLOYABLE_FILES = (
     "scripts/assistant_scheduler_health.py",
     "scripts/assistant_scheduler_health_launcher.py",
     "scripts/assistant_scheduler_state.py",
+    "scripts/assistant_learning_scheduler.py",
+    "scripts/assistant_preference_models.py",
+    "scripts/assistant_outcome_observer.py",
+    "scripts/assistant_learning_store.py",
     "scripts/coding_signal_sync.py",
     "scripts/coding_session_inspector.py",
     "scripts/coding_repo_inspector.py",
@@ -215,6 +223,8 @@ RUNTIME_DEPLOYABLE_FILES = (
     "skills/coding-focus-calendar/SKILL.md",
     "skills/daily-personal-briefing/SKILL.md",
     "skills/priority-arbitrator/SKILL.md",
+    "skills/preference-models/SKILL.md",
+    "skills/outcome-observer/SKILL.md",
     "scripts/training_calendar_live_booking.py",
     "scripts/training_calendar_proposal_engine.py",
     "scripts/training_calendar_reconciler.py",
@@ -1191,6 +1201,54 @@ def build_parser() -> argparse.ArgumentParser:
     daily_readiness.add_argument("--state-db", dest="state_db")
     daily_readiness.add_argument("--audit-ledger", dest="audit_ledger")
     daily_readiness.add_argument("--json", action="store_true", dest="json_output")
+
+
+    outcomes_collect = sub.add_parser("assistant-outcomes-collect", help="Collect sanitized Rocky assistant outcome observations.")
+    outcomes_collect.add_argument("--since-days", type=int, default=7, dest="since_days")
+    outcomes_collect.add_argument("--live", action="store_true")
+    outcomes_collect.add_argument("--learning-db", dest="learning_db")
+    outcomes_collect.add_argument("--scheduler-db", dest="scheduler_db")
+    outcomes_collect.add_argument("--calendar-state-db", dest="calendar_state_db")
+    outcomes_collect.add_argument("--ledger-path", dest="ledger_path")
+    outcomes_collect.add_argument("--no-write-audit", action="store_false", dest="write_audit", default=True)
+    outcomes_collect.add_argument("--json", action="store_true", dest="json_output")
+
+    learning_summary_parser = sub.add_parser("assistant-learning-summary", help="Show Rocky assistant learning summary.")
+    learning_summary_parser.add_argument("--learning-db", dest="learning_db")
+    learning_summary_parser.add_argument("--json", action="store_true", dest="json_output")
+
+    preferences_show = sub.add_parser("assistant-preferences-show", help="Show bounded Rocky assistant preference models.")
+    preferences_show.add_argument("--learning-db", dest="learning_db")
+    preferences_show.add_argument("--json", action="store_true", dest="json_output")
+
+    learning_proposals = sub.add_parser("assistant-learning-proposals", help="Show review-only Rocky learning proposals.")
+    learning_proposals.add_argument("--learning-db", dest="learning_db")
+    learning_proposals.add_argument("--status", default="proposed")
+    learning_proposals.add_argument("--limit", type=int, default=50)
+    learning_proposals.add_argument("--json", action="store_true", dest="json_output")
+
+    learning_apply = sub.add_parser("assistant-learning-apply", help="Mark one Rocky learning proposal applied when --live is supplied.")
+    learning_apply.add_argument("--proposal-id", required=True, dest="proposal_id")
+    learning_apply.add_argument("--learning-db", dest="learning_db")
+    learning_apply.add_argument("--ledger-path", dest="ledger_path")
+    learning_apply.add_argument("--live", action="store_true")
+    learning_apply.add_argument("--json", action="store_true", dest="json_output")
+
+    learning_scheduler = sub.add_parser("assistant-learning-scheduler-run", help="Run Rocky assistant outcome learning scheduler.")
+    learning_scheduler.add_argument("--planning-date", dest="planning_date")
+    learning_scheduler.add_argument("--since-days", type=int, default=7, dest="since_days")
+    learning_scheduler.add_argument("--live", action="store_true")
+    learning_scheduler.add_argument("--notify-failures", action="store_true", dest="notify_failures")
+    learning_scheduler.add_argument("--notification-dry-run", action="store_true", dest="notification_dry_run")
+    learning_scheduler.add_argument("--notification-channel-id", dest="notification_channel_id")
+    learning_scheduler.add_argument("--learning-db", dest="learning_db")
+    learning_scheduler.add_argument("--scheduler-db", dest="scheduler_db")
+    learning_scheduler.add_argument("--calendar-state-db", dest="calendar_state_db")
+    learning_scheduler.add_argument("--ledger-path", dest="ledger_path")
+    learning_scheduler.add_argument("--state-file", default="/Users/clawdbot/.openclaw/state/assistant_learning_scheduler.json", dest="state_file")
+    learning_scheduler.add_argument("--lock-ttl-seconds", type=int, default=1800, dest="lock_ttl_seconds")
+    learning_scheduler.add_argument("--no-write-audit", action="store_false", dest="write_audit", default=True)
+    learning_scheduler.add_argument("--json", action="store_true", dest="json_output")
 
     notification_dispatch = sub.add_parser(
         "assistant-notification-dispatch",
@@ -3052,6 +3110,97 @@ def cmd_daily_personal_briefing_readiness(args) -> int:
     return 0 if payload.get("status") == "ready_verified" else 1
 
 
+
+def cmd_assistant_outcomes_collect(args) -> int:
+    payload = collect_outcomes(
+        since_days=args.since_days,
+        live=args.live,
+        learning_db_path=args.learning_db,
+        scheduler_db_path=args.scheduler_db,
+        calendar_state_db_path=args.calendar_state_db,
+        ledger_path=args.ledger_path,
+        write_audit=args.write_audit,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Assistant outcomes: {payload.get('status')} count={payload.get('outcome_count')}")
+    return 0 if payload.get("status") == "ok" else 1
+
+
+def cmd_assistant_learning_summary(args) -> int:
+    payload = learning_summary(db_path=args.learning_db)
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Assistant learning: {payload.get('status')} active={payload.get('active_bounded_count', 0)} proposals={payload.get('proposal_count', 0)} outcomes={payload.get('outcome_count', 0)}")
+    return 0 if payload.get("status") in {"ok", "empty"} else 1
+
+
+def cmd_assistant_preferences_show(args) -> int:
+    payload = learning_summary(db_path=args.learning_db)
+    result = {"status": payload.get("status"), "preferences": payload.get("preferences") or [], "active_bounded_count": payload.get("active_bounded_count", 0)}
+    if args.json_output:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        print(f"Assistant preferences: {result['active_bounded_count']} active bounded")
+        for pref in result["preferences"]:
+            print(f"- {pref.get('preference_key')}: {pref.get('status')} {pref.get('value')}")
+    return 0
+
+
+def cmd_assistant_learning_proposals(args) -> int:
+    store = AssistantLearningStore(args.learning_db)
+    status = None if args.status == "all" else args.status
+    proposals = store.list_learning_proposals(status=status, limit=args.limit)
+    payload = {"status": "ok", "count": len(proposals), "proposals": proposals}
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Assistant learning proposals: {len(proposals)}")
+    return 0
+
+
+def cmd_assistant_learning_apply(args) -> int:
+    if not args.live:
+        payload = {"status": "blocked", "reason": "live_flag_required", "proposal_id": args.proposal_id, "calendar_write_attempted": False, "notion_write_attempted": False}
+    else:
+        store = AssistantLearningStore(args.learning_db)
+        proposal = store.mark_proposal_applied(args.proposal_id)
+        payload = {"status": "applied" if proposal else "blocked", "reason": "learning_proposal_applied" if proposal else "learning_proposal_not_found", "proposal": proposal, "calendar_write_attempted": False, "notion_write_attempted": False}
+        if proposal:
+            event = AssistantAuditLog(args.ledger_path).record_event(event_type="assistant.learning_proposal_applied", workflow="assistant_preference_models", idempotency_key=args.proposal_id, policy_version="rocky-outcome-learning-v1", decision="completed", reason="learning_proposal_applied", sources=["assistant_learning_store"], artifacts={"proposal_id": args.proposal_id})
+            payload["audit_id"] = event.audit_id
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Assistant learning apply: {payload.get('status')} ({payload.get('reason')})")
+    return 0 if payload.get("status") == "applied" else 2
+
+
+def cmd_assistant_learning_scheduler_run(args) -> int:
+    payload = run_assistant_learning_scheduler(
+        planning_date=args.planning_date,
+        since_days=args.since_days,
+        live=args.live,
+        notify_failures=args.notify_failures,
+        notification_dry_run=args.notification_dry_run,
+        notification_channel_id=args.notification_channel_id,
+        learning_db_path=args.learning_db,
+        scheduler_db_path=args.scheduler_db,
+        calendar_state_db_path=args.calendar_state_db,
+        ledger_path=args.ledger_path,
+        state_file=args.state_file,
+        lock_ttl_seconds=args.lock_ttl_seconds,
+        write_audit=args.write_audit,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Assistant learning scheduler: {payload.get('status')} ({payload.get('reason')})")
+    return 0 if payload.get("status") in {"ok", "degraded_no_active_preferences", "skipped_insufficient_evidence", "skipped_duplicate_run"} else 1
+
+
 def cmd_assistant_notification_dispatch(args) -> int:
     payload = dispatch_failure_notification(
         {
@@ -3749,6 +3898,12 @@ def main() -> int:
         "task-command-recent": cmd_task_command_recent,
         "task-command-reconcile": cmd_task_command_reconcile,
         "task-spine-scheduler-run": cmd_task_spine_scheduler_run,
+        "assistant-outcomes-collect": cmd_assistant_outcomes_collect,
+        "assistant-learning-summary": cmd_assistant_learning_summary,
+        "assistant-preferences-show": cmd_assistant_preferences_show,
+        "assistant-learning-proposals": cmd_assistant_learning_proposals,
+        "assistant-learning-apply": cmd_assistant_learning_apply,
+        "assistant-learning-scheduler-run": cmd_assistant_learning_scheduler_run,
         "assistant-notification-dispatch": cmd_assistant_notification_dispatch,
         "agentmail-bridge-health": cmd_agentmail_bridge_health,
         "assistant-scheduler-health": cmd_assistant_scheduler_health,

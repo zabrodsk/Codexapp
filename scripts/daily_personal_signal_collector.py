@@ -17,6 +17,7 @@ if str(SCRIPTS) not in sys.path:
 
 from apple_calendar_cli import DEFAULT_DB_PATH, query_events
 from assistant_scheduler_state import AssistantSchedulerState
+from assistant_preference_models import learning_summary
 from coding_focus_proposal_engine import build_coding_focus_proposals
 from coding_work_briefing_builder import build_coding_work_briefing
 from email_triage_proposal_engine import build_email_triage_proposals
@@ -57,6 +58,8 @@ def collect_daily_personal_signals(
     include_live_tasks: bool = True,
     include_live_coding: bool = True,
     include_live_commands: bool = True,
+    include_learning: bool = True,
+    learning_db_path: str | Path | None = None,
 ) -> dict[str, Any]:
     planning_day = _parse_date(planning_date) if planning_date else datetime.now(ZoneInfo(TIMEZONE)).date()
     is_weekday = planning_day.weekday() < 5
@@ -140,6 +143,14 @@ def collect_daily_personal_signals(
             errors.append({"source": "commands", "reason": "task_command_recent_failed", "error_hash": _hash_text(str(exc))})
     command_activity = _command_summary(command_raw or {})
 
+    learning = {"status": "skipped", "reason": "learning_disabled"}
+    if include_learning:
+        try:
+            learning = _learning_summary(learning_summary(db_path=learning_db_path))
+        except Exception as exc:
+            learning = {"status": "degraded", "reason": "learning_summary_failed", "error_hash": _hash_text(str(exc))}
+            errors.append({"source": "learning", "reason": "learning_summary_failed", "error_hash": _hash_text(str(exc))})
+
     payload = {
         "status": "ok" if not errors else "degraded",
         "workflow": WORKFLOW,
@@ -155,6 +166,7 @@ def collect_daily_personal_signals(
         "task_focus": task_focus,
         "coding": coding,
         "command_activity": command_activity,
+        "learning": learning,
         "scheduler": scheduler,
         "dead_letters": dead,
         "errors": errors,
@@ -312,6 +324,15 @@ def _dead_letter_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "status": "ok" if not rows else "attention_needed",
         "open_count": len(rows),
         "items": [_safe_mapping(row, keys=("dead_letter_id", "job_name", "failure_class", "safe_summary", "recovery_hint", "error_hash")) for row in rows[:8]],
+    }
+
+def _learning_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": payload.get("status") or "unknown",
+        "active_bounded_count": int(payload.get("active_bounded_count") or 0),
+        "proposal_count": int(payload.get("proposal_count") or 0),
+        "outcome_count": int(payload.get("outcome_count") or 0),
+        "latest_outcome": _safe_mapping(payload.get("latest_outcome") or {}, keys=("lane", "outcome_type", "outcome_status", "safe_summary")),
     }
 
 
