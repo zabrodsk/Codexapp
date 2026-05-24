@@ -26,6 +26,9 @@ from assistant_scheduler_health import (
     TASK_SPINE_SSH_BRIDGE_PROGRAM_ARGUMENTS,
     TASK_COMMAND_CAPTURE_DIRECT_PROGRAM_ARGUMENTS,
     TASK_COMMAND_CAPTURE_SPEC,
+    DAILY_PERSONAL_BRIEFING_DIRECT_PROGRAM_ARGUMENTS,
+    DAILY_PERSONAL_BRIEFING_SPEC,
+    DAILY_PERSONAL_BRIEFING_SSH_BRIDGE_PROGRAM_ARGUMENTS,
     TRAINING_CALENDAR_DIRECT_PROGRAM_ARGUMENTS,
     TRAINING_CALENDAR_BOOKING_SPEC,
     TRAINING_CALENDAR_SSH_BRIDGE_PROGRAM_ARGUMENTS,
@@ -215,6 +218,22 @@ def test_task_command_capture_launchagent_spec_matches_production_interval():
     assert spec.launchagent.stdout_path == "/Users/clawdbot/.openclaw/logs/rocky-task-command-capture.log"
     assert spec.launchagent.stderr_path == "/Users/clawdbot/.openclaw/logs/rocky-task-command-capture.err.log"
     assert spec.state_path == "/Users/clawdbot/.openclaw/state/task_command_capture_scheduler.json"
+
+
+def test_daily_personal_briefing_launchagent_spec_matches_production_schedule():
+    spec = DAILY_PERSONAL_BRIEFING_SPEC
+
+    assert JOB_REGISTRY["daily_personal_briefing"] is spec
+    assert spec.workflow == "daily_personal_briefing_scheduler"
+    assert spec.launchagent.label == "com.openclaw.rocky-daily-personal-briefing"
+    assert spec.launchagent.program_arguments == DAILY_PERSONAL_BRIEFING_SSH_BRIDGE_PROGRAM_ARGUMENTS
+    assert "daily_personal_briefing_scheduler.py --live --notify --apply-safe-bookings --json" in " ".join(spec.launchagent.program_arguments)
+    assert launchagent_execution_mode(spec.launchagent.program_arguments) == "localhost_ssh_bridge"
+    assert launchagent_execution_mode(DAILY_PERSONAL_BRIEFING_DIRECT_PROGRAM_ARGUMENTS) == "direct_launchd_python"
+    assert spec.launchagent.weekdays == [1, 2, 3, 4, 5]
+    assert spec.launchagent.hour == 11
+    assert spec.launchagent.minute == 35
+    assert spec.state_path == "/Users/clawdbot/.openclaw/state/daily_personal_briefing_scheduler.json"
 
 
 def test_training_calendar_health_reports_ssh_bridge_mode(tmp_path):

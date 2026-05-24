@@ -159,6 +159,9 @@ def test_parser_includes_assistant_commands():
     assert parser.parse_args(["coding-work-scheduler-run"]).command == "coding-work-scheduler-run"
     assert parser.parse_args(["coding-work-scheduler-run", "--no-memory"]).use_memory is False
     assert parser.parse_args(["coding-work-llm-health"]).command == "coding-work-llm-health"
+    assert parser.parse_args(["daily-personal-briefing"]).command == "daily-personal-briefing"
+    assert parser.parse_args(["daily-priority-arbitrate", "--signals-file", "/tmp/signals.json"]).command == "daily-priority-arbitrate"
+    assert parser.parse_args(["daily-personal-briefing-run", "--live", "--notify", "--apply-safe-bookings"]).command == "daily-personal-briefing-run"
     assert parser.parse_args(["task-command-apply", "--text", "remember this"]).command == "task-command-apply"
     assert parser.parse_args(["task-command-capture-run"]).command == "task-command-capture-run"
     assert parser.parse_args(["task-command-recent"]).command == "task-command-recent"
@@ -178,6 +181,24 @@ def test_agentmail_bridge_health_runtime_command_is_wired(capsys):
     assert result == 0
     assert payload["status"] == "ok"
     assert payload["secrets_included"] is False
+
+
+def test_daily_personal_briefing_runtime_command_is_wired(capsys):
+    from rocky_runtime_tools import cmd_daily_personal_briefing, cmd_daily_personal_briefing_run
+
+    with patch("rocky_runtime_tools.run_daily_personal_briefing", return_value={"status": "ok", "discord_message": "Rocky daily brief"}) as brief:
+        result = cmd_daily_personal_briefing(_args(planning_date="2026-05-25", db_path=None, scheduler_db=None, use_llm=False, json_output=True))
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert payload["status"] == "ok"
+    brief.assert_called_once()
+
+    with patch("rocky_runtime_tools.run_daily_personal_briefing_scheduler", return_value={"status": "skipped_weekend_briefing", "reason": "weekend"}) as run:
+        result = cmd_daily_personal_briefing_run(_args(planning_date="2026-05-24", live=True, notify=True, notification_dry_run=True, notification_channel_id=None, apply_safe_bookings=True, db_path=None, calendar_state_db=None, scheduler_db=None, ledger_path=None, state_file="/tmp/state.json", lock_ttl_seconds=1800, write_audit=False, use_llm=False, json_output=True))
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert payload["status"] == "skipped_weekend_briefing"
+    run.assert_called_once()
 
 
 def test_task_detector_llm_health_json_uses_safe_helper(capsys):
@@ -816,10 +837,16 @@ def test_runtime_deployable_files_include_training_calendar_modules():
     assert "scripts/coding_focus_proposal_engine.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/coding_focus_live_booking.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/coding_work_scheduler.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/daily_personal_signal_collector.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/daily_priority_arbitrator.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/daily_personal_briefing_renderer.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/daily_personal_briefing_scheduler.py" in RUNTIME_DEPLOYABLE_FILES
     assert "skills/coding-session-inspector/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
     assert "skills/coding-memory-enricher/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
     assert "skills/coding-work-briefing/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
     assert "skills/coding-focus-calendar/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
+    assert "skills/daily-personal-briefing/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
+    assert "skills/priority-arbitrator/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
 
 
 def test_training_calendar_reconcile_cli_uses_reconcile_path(tmp_path, capsys):

@@ -104,6 +104,8 @@ from coding_session_inspector import inspect_coding_signals
 from coding_signal_sync import run_sync as run_coding_signal_sync
 from coding_work_briefing_builder import build_coding_work_briefing
 from coding_work_scheduler import run_coding_work_scheduler
+from daily_personal_briefing_scheduler import run_daily_personal_briefing, run_daily_personal_briefing_scheduler
+from daily_priority_arbitrator import arbitrate_daily_priorities
 from email_triage_live_booking import book_email_triage_proposal
 from email_triage_proposal_engine import build_email_triage_proposals
 from email_triage_scheduler import run_email_triage_scheduler
@@ -168,6 +170,10 @@ RUNTIME_DEPLOYABLE_FILES = (
     "scripts/coding_focus_proposal_engine.py",
     "scripts/coding_focus_live_booking.py",
     "scripts/coding_work_scheduler.py",
+    "scripts/daily_personal_signal_collector.py",
+    "scripts/daily_priority_arbitrator.py",
+    "scripts/daily_personal_briefing_renderer.py",
+    "scripts/daily_personal_briefing_scheduler.py",
     "scripts/email_triage_live_booking.py",
     "scripts/email_triage_proposal_engine.py",
     "scripts/email_triage_reader.py",
@@ -205,6 +211,8 @@ RUNTIME_DEPLOYABLE_FILES = (
     "skills/coding-memory-enricher/SKILL.md",
     "skills/coding-work-briefing/SKILL.md",
     "skills/coding-focus-calendar/SKILL.md",
+    "skills/daily-personal-briefing/SKILL.md",
+    "skills/priority-arbitrator/SKILL.md",
     "scripts/training_calendar_live_booking.py",
     "scripts/training_calendar_proposal_engine.py",
     "scripts/training_calendar_reconciler.py",
@@ -1115,6 +1123,44 @@ def build_parser() -> argparse.ArgumentParser:
         help="Check Rocky's Codex LLM path used for coding work ranking.",
     )
     coding_llm.add_argument("--json", action="store_true", dest="json_output")
+
+    daily_briefing = sub.add_parser(
+        "daily-personal-briefing",
+        help="Build Rocky's consolidated daily personal assistant briefing without writes.",
+    )
+    daily_briefing.add_argument("--planning-date", dest="planning_date")
+    daily_briefing.add_argument("--db-path", dest="db_path")
+    daily_briefing.add_argument("--scheduler-db", dest="scheduler_db")
+    daily_briefing.add_argument("--use-llm", action="store_true", dest="use_llm")
+    daily_briefing.add_argument("--json", action="store_true", dest="json_output")
+
+    daily_arbitrate = sub.add_parser(
+        "daily-priority-arbitrate",
+        help="Run daily priority arbitration over a supplied sanitized signal JSON file.",
+    )
+    daily_arbitrate.add_argument("--signals-file", required=True, dest="signals_file")
+    daily_arbitrate.add_argument("--use-llm", action="store_true", dest="use_llm")
+    daily_arbitrate.add_argument("--json", action="store_true", dest="json_output")
+
+    daily_scheduler = sub.add_parser(
+        "daily-personal-briefing-run",
+        help="Run Rocky's daily personal briefing scheduler with optional safe booking actions.",
+    )
+    daily_scheduler.add_argument("--planning-date", dest="planning_date")
+    daily_scheduler.add_argument("--live", action="store_true")
+    daily_scheduler.add_argument("--notify", action="store_true")
+    daily_scheduler.add_argument("--notification-dry-run", action="store_true", dest="notification_dry_run")
+    daily_scheduler.add_argument("--notification-channel-id", dest="notification_channel_id")
+    daily_scheduler.add_argument("--apply-safe-bookings", action="store_true", dest="apply_safe_bookings")
+    daily_scheduler.add_argument("--db-path", dest="db_path")
+    daily_scheduler.add_argument("--calendar-state-db", dest="calendar_state_db")
+    daily_scheduler.add_argument("--scheduler-db", dest="scheduler_db")
+    daily_scheduler.add_argument("--ledger-path", dest="ledger_path")
+    daily_scheduler.add_argument("--state-file", default="/Users/clawdbot/.openclaw/state/daily_personal_briefing_scheduler.json", dest="state_file")
+    daily_scheduler.add_argument("--lock-ttl-seconds", type=int, default=1800, dest="lock_ttl_seconds")
+    daily_scheduler.add_argument("--no-write-audit", action="store_false", dest="write_audit", default=True)
+    daily_scheduler.add_argument("--use-llm", action="store_true", dest="use_llm")
+    daily_scheduler.add_argument("--json", action="store_true", dest="json_output")
 
     notification_dispatch = sub.add_parser(
         "assistant-notification-dispatch",
@@ -2886,6 +2932,55 @@ def cmd_email_triage_scheduler_run(args) -> int:
     return 1
 
 
+def cmd_daily_personal_briefing(args) -> int:
+    payload = run_daily_personal_briefing(
+        planning_date=args.planning_date,
+        db_path=args.db_path,
+        scheduler_db_path=args.scheduler_db,
+        use_llm=args.use_llm,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(payload.get("discord_message") or (payload.get("rendered") or {}).get("discord_message") or f"Daily briefing: {payload.get('status')}")
+    return 0 if payload.get("status") in {"ok", "degraded"} else 1
+
+
+def cmd_daily_priority_arbitrate(args) -> int:
+    signals = json.loads(Path(args.signals_file).read_text(encoding="utf-8"))
+    payload = arbitrate_daily_priorities(signals, use_llm=args.use_llm)
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        top = payload.get("top_priority") or {}
+        print(f"Daily priority: {top.get('category')} - {top.get('title')}")
+    return 0 if payload.get("status") in {"ok", "degraded"} else 1
+
+
+def cmd_daily_personal_briefing_run(args) -> int:
+    payload = run_daily_personal_briefing_scheduler(
+        planning_date=args.planning_date,
+        live=args.live,
+        notify=args.notify,
+        notification_dry_run=args.notification_dry_run,
+        notification_channel_id=args.notification_channel_id,
+        apply_safe_bookings=args.apply_safe_bookings,
+        db_path=args.db_path,
+        calendar_state_db_path=args.calendar_state_db,
+        scheduler_db_path=args.scheduler_db,
+        ledger_path=args.ledger_path,
+        state_file=args.state_file,
+        lock_ttl_seconds=args.lock_ttl_seconds,
+        write_audit=args.write_audit,
+        use_llm=args.use_llm,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Daily personal briefing: {payload.get('status')} ({payload.get('reason')})")
+    return 0 if payload.get("status") in {"ok", "degraded", "skipped_weekend_briefing", "skipped_duplicate_run"} else 1
+
+
 def cmd_assistant_notification_dispatch(args) -> int:
     payload = dispatch_failure_notification(
         {
@@ -3572,6 +3667,9 @@ def main() -> int:
         "coding-focus-book": cmd_coding_focus_book,
         "coding-work-scheduler-run": cmd_coding_work_scheduler_run,
         "coding-work-llm-health": cmd_coding_work_llm_health,
+        "daily-personal-briefing": cmd_daily_personal_briefing,
+        "daily-priority-arbitrate": cmd_daily_priority_arbitrate,
+        "daily-personal-briefing-run": cmd_daily_personal_briefing_run,
         "task-command-apply": cmd_task_command_apply,
         "task-command-capture-run": cmd_task_command_capture_run,
         "task-command-recent": cmd_task_command_recent,
