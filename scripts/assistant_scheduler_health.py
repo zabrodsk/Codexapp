@@ -142,6 +142,22 @@ WEEKLY_PERSONAL_REVIEW_DIRECT_PROGRAM_ARGUMENTS = [
     "--notify",
     "--json",
 ]
+MEETING_PREP_BRIEFING_SSH_BRIDGE_PROGRAM_ARGUMENTS = [
+    "/usr/bin/ssh",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "StrictHostKeyChecking=accept-new",
+    "localhost",
+    "cd /Users/clawdbot/.openclaw/workspace && /Users/clawdbot/.openclaw/workspace/.venv/bin/python scripts/meeting_prep_scheduler.py --live --notify --json",
+]
+MEETING_PREP_BRIEFING_DIRECT_PROGRAM_ARGUMENTS = [
+    "/Users/clawdbot/.openclaw/workspace/.venv/bin/python",
+    "/Users/clawdbot/.openclaw/workspace/scripts/meeting_prep_scheduler.py",
+    "--live",
+    "--notify",
+    "--json",
+]
 
 
 @dataclass(frozen=True)
@@ -364,6 +380,29 @@ WEEKLY_PERSONAL_REVIEW_SPEC = SchedulerJobSpec(
     first_expected_run_after="2026-05-25T07:15:00+02:00",
 )
 
+MEETING_PREP_BRIEFING_SPEC = SchedulerJobSpec(
+    job_name="meeting_prep_briefing",
+    job_label="Rocky meeting prep briefing",
+    workflow="meeting_prep_scheduler",
+    launchagent=LaunchAgentSpec(
+        label="com.openclaw.rocky-meeting-prep-briefing",
+        plist_path="/Users/clawdbot/Library/LaunchAgents/com.openclaw.rocky-meeting-prep-briefing.plist",
+        program_arguments=MEETING_PREP_BRIEFING_SSH_BRIDGE_PROGRAM_ARGUMENTS,
+        working_directory="/Users/clawdbot/.openclaw/workspace",
+        stdout_path="/Users/clawdbot/.openclaw/logs/rocky-meeting-prep-briefing.log",
+        stderr_path="/Users/clawdbot/.openclaw/logs/rocky-meeting-prep-briefing.err.log",
+        weekdays=[1, 2, 3, 4, 5],
+        hour=7,
+        minute=30,
+        timezone="Europe/Prague",
+        first_expected_run_after="2026-05-25T07:30:00+02:00",
+        start_interval_seconds=900,
+    ),
+    state_path="/Users/clawdbot/.openclaw/state/meeting_prep_scheduler.json",
+    first_expected_run_after="2026-05-25T07:30:00+02:00",
+    missing_log_grace_minutes=30,
+)
+
 JOB_REGISTRY = {
     BETTY_MAIL_TRIAGE_SPEC.job_name: BETTY_MAIL_TRIAGE_SPEC,
     TRAINING_CALENDAR_BOOKING_SPEC.job_name: TRAINING_CALENDAR_BOOKING_SPEC,
@@ -374,6 +413,7 @@ JOB_REGISTRY = {
     DAILY_PERSONAL_BRIEFING_SPEC.job_name: DAILY_PERSONAL_BRIEFING_SPEC,
     ASSISTANT_LEARNING_SPEC.job_name: ASSISTANT_LEARNING_SPEC,
     WEEKLY_PERSONAL_REVIEW_SPEC.job_name: WEEKLY_PERSONAL_REVIEW_SPEC,
+    MEETING_PREP_BRIEFING_SPEC.job_name: MEETING_PREP_BRIEFING_SPEC,
 }
 
 
@@ -533,9 +573,26 @@ def launchagent_execution_mode(program_arguments: list[str]) -> str:
     ):
         return "localhost_ssh_bridge"
     if (
+        program_arguments[:1] == ["/usr/bin/ssh"]
+        and "localhost" in program_arguments
+        and "meeting_prep_scheduler.py --live" in joined
+        and "--notify" in joined
+        and "--json" in joined
+    ):
+        return "localhost_ssh_bridge"
+    if (
         program_arguments
         and program_arguments[0].endswith("/python")
         and any(arg.endswith("weekly_personal_review_scheduler.py") for arg in program_arguments)
+        and "--live" in program_arguments
+        and "--notify" in program_arguments
+        and "--json" in program_arguments
+    ):
+        return "direct_launchd_python"
+    if (
+        program_arguments
+        and program_arguments[0].endswith("/python")
+        and any(arg.endswith("meeting_prep_scheduler.py") for arg in program_arguments)
         and "--live" in program_arguments
         and "--notify" in program_arguments
         and "--json" in program_arguments

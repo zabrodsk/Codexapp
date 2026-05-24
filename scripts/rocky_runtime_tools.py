@@ -128,6 +128,14 @@ from notion_task_manager import (
     upsert_task,
 )
 from meeting_task_signal_reader import collect_meeting_task_signals
+from meeting_calendar_reader import read_upcoming_meetings
+from meeting_context_enricher import enrich_meeting_context
+from meeting_context_note_capture import run_meeting_context_note_capture
+from meeting_context_note_ledger import MeetingContextNoteLedger
+from meeting_prep_briefing_builder import build_meeting_prep_briefing
+from meeting_prep_notion_manager import ensure_meeting_prep_database_schema, meeting_prep_notion_health, upsert_meeting_prep_note
+from meeting_prep_readiness import evaluate_meeting_prep_readiness
+from meeting_prep_scheduler import build_meeting_prep_candidates, build_meeting_prep_for_key, list_meeting_prep_runs, run_meeting_prep_scheduler
 from task_deduper import dedupe_task_candidates
 from task_identity_resolver import resolve_task_identities
 from task_lifecycle_engine import run_task_lifecycle
@@ -208,6 +216,16 @@ RUNTIME_DEPLOYABLE_FILES = (
     "scripts/email_triage_time_estimator.py",
     "scripts/notion_task_manager.py",
     "scripts/meeting_task_signal_reader.py",
+    "scripts/meeting_calendar_reader.py",
+    "scripts/meeting_context_collector.py",
+    "scripts/meeting_context_enricher.py",
+    "scripts/meeting_context_note_capture.py",
+    "scripts/meeting_context_note_ledger.py",
+    "scripts/meeting_email_context_reader.py",
+    "scripts/meeting_prep_briefing_builder.py",
+    "scripts/meeting_prep_notion_manager.py",
+    "scripts/meeting_prep_readiness.py",
+    "scripts/meeting_prep_scheduler.py",
     "scripts/discord_task_command_reader.py",
     "scripts/email_task_command_reader.py",
     "scripts/task_command_capture_scheduler.py",
@@ -245,6 +263,10 @@ RUNTIME_DEPLOYABLE_FILES = (
     "skills/weekly-personal-review/SKILL.md",
     "skills/weekly-priority-planner/SKILL.md",
     "skills/calendar-hygiene/SKILL.md",
+    "skills/meeting-prep-briefing/SKILL.md",
+    "skills/meeting-context-enricher/SKILL.md",
+    "skills/meeting-prep-notion/SKILL.md",
+    "skills/discord-context-note-capture/SKILL.md",
     "skills/production-readiness/SKILL.md",
     "skills/safe-recovery/SKILL.md",
     "scripts/training_calendar_live_booking.py",
@@ -908,6 +930,96 @@ def build_parser() -> argparse.ArgumentParser:
     meeting_task_signals.add_argument("--since-days", type=int, default=14)
     meeting_task_signals.add_argument("--limit", type=int, default=30)
     meeting_task_signals.add_argument("--json", action="store_true", dest="json_output")
+
+    meeting_candidates = sub.add_parser(
+        "meeting-prep-candidates",
+        help="List upcoming calendar meetings and safe prep-context availability.",
+    )
+    meeting_candidates.add_argument("--planning-date", dest="planning_date")
+    meeting_candidates.add_argument("--days", type=int, default=1)
+    meeting_candidates.add_argument("--limit", type=int, default=20)
+    meeting_candidates.add_argument("--db-path", dest="db_path")
+    meeting_candidates.add_argument("--note-ledger-db", dest="note_ledger_db")
+    meeting_candidates.add_argument("--with-context", action="store_true", dest="include_context", default=False)
+    meeting_candidates.add_argument("--json", action="store_true", dest="json_output")
+
+    meeting_brief = sub.add_parser(
+        "meeting-prep-brief",
+        help="Build a sanitized prep brief for one meeting key.",
+    )
+    meeting_brief.add_argument("--meeting-key", required=True, dest="meeting_key")
+    meeting_brief.add_argument("--planning-date", dest="planning_date")
+    meeting_brief.add_argument("--db-path", dest="db_path")
+    meeting_brief.add_argument("--note-ledger-db", dest="note_ledger_db")
+    meeting_brief.add_argument("--json", action="store_true", dest="json_output")
+
+    meeting_scheduler = sub.add_parser(
+        "meeting-prep-scheduler-run",
+        help="Run Rocky's pre-meeting prep scheduler.",
+    )
+    meeting_scheduler.add_argument("--planning-date", dest="planning_date")
+    meeting_scheduler.add_argument("--live", action="store_true")
+    meeting_scheduler.add_argument("--notify", action="store_true")
+    meeting_scheduler.add_argument("--notification-dry-run", action="store_true", dest="notification_dry_run")
+    meeting_scheduler.add_argument("--notification-channel-id", dest="notification_channel_id")
+    meeting_scheduler.add_argument("--db-path", dest="db_path")
+    meeting_scheduler.add_argument("--note-ledger-db", dest="note_ledger_db")
+    meeting_scheduler.add_argument("--scheduler-db", dest="scheduler_db")
+    meeting_scheduler.add_argument("--ledger-path", dest="ledger_path")
+    meeting_scheduler.add_argument("--state-file", default="/Users/clawdbot/.openclaw/state/meeting_prep_scheduler.json", dest="state_file")
+    meeting_scheduler.add_argument("--no-write-audit", action="store_false", dest="write_audit", default=True)
+    meeting_scheduler.add_argument("--json", action="store_true", dest="json_output")
+
+    meeting_recent = sub.add_parser(
+        "meeting-prep-recent",
+        help="Show recent sanitized Rocky meeting prep scheduler runs.",
+    )
+    meeting_recent.add_argument("--limit", type=int, default=20)
+    meeting_recent.add_argument("--state-db", dest="state_db")
+    meeting_recent.add_argument("--json", action="store_true", dest="json_output")
+
+    meeting_readiness = sub.add_parser(
+        "meeting-prep-readiness",
+        help="Read-only production readiness gate for Rocky meeting prep.",
+    )
+    meeting_readiness.add_argument("--expected-date", dest="expected_date")
+    meeting_readiness.add_argument("--now-local", dest="now_local")
+    meeting_readiness.add_argument("--state-db", dest="state_db")
+    meeting_readiness.add_argument("--state-file", dest="state_file")
+    meeting_readiness.add_argument("--json", action="store_true", dest="json_output")
+
+    meeting_notion_health = sub.add_parser(
+        "meeting-prep-notion-health",
+        help="Check Rocky's Notion meeting prep database configuration.",
+    )
+    meeting_notion_health.add_argument("--json", action="store_true", dest="json_output")
+
+    meeting_notion_schema = sub.add_parser(
+        "meeting-prep-notion-schema-ensure",
+        help="Dry-run or create/repair Rocky's Notion meeting prep database schema.",
+    )
+    meeting_notion_schema.add_argument("--live", action="store_true")
+    meeting_notion_schema.add_argument("--json", action="store_true", dest="json_output")
+
+    meeting_notes_recent = sub.add_parser(
+        "meeting-context-notes-recent",
+        help="Show recently captured Discord context notes for planning and meeting prep.",
+    )
+    meeting_notes_recent.add_argument("--limit", type=int, default=20)
+    meeting_notes_recent.add_argument("--ledger-db", dest="ledger_db")
+    meeting_notes_recent.add_argument("--json", action="store_true", dest="json_output")
+
+    meeting_note_capture = sub.add_parser(
+        "meeting-context-note-capture-run",
+        help="Capture approved Dusan Discord context notes for meeting prep and day planning.",
+    )
+    meeting_note_capture.add_argument("--live", action="store_true")
+    meeting_note_capture.add_argument("--notification-dry-run", action="store_true", dest="notification_dry_run")
+    meeting_note_capture.add_argument("--since-minutes", type=int, default=60, dest="since_minutes")
+    meeting_note_capture.add_argument("--limit", type=int, default=25)
+    meeting_note_capture.add_argument("--ledger-db", dest="ledger_db")
+    meeting_note_capture.add_argument("--no-ack", action="store_true", dest="no_ack")
+    meeting_note_capture.add_argument("--json", action="store_true", dest="json_output")
 
     task_llm_health = sub.add_parser(
         "task-detector-llm-health",
@@ -3745,6 +3857,128 @@ def cmd_meeting_task_signals(args) -> int:
     return 0 if payload.get("status") in {"ok", "degraded"} else 1
 
 
+def cmd_meeting_prep_candidates(args) -> int:
+    payload = build_meeting_prep_candidates(
+        planning_date=args.planning_date,
+        db_path=args.db_path,
+        note_ledger_db_path=args.note_ledger_db,
+        days=args.days,
+        limit=args.limit,
+        include_context=args.include_context,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Meeting prep candidates: {payload.get('candidate_count', 0)}")
+    return 0 if payload.get("status") in {"ok", "degraded"} else 1
+
+
+def cmd_meeting_prep_brief(args) -> int:
+    payload = build_meeting_prep_for_key(
+        meeting_key=args.meeting_key,
+        planning_date=args.planning_date,
+        db_path=args.db_path,
+        note_ledger_db_path=args.note_ledger_db,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        briefing = payload.get("briefing") or {}
+        print(briefing.get("discord_message") or f"Meeting prep brief: {payload.get('status')} ({payload.get('reason')})")
+    return 0 if payload.get("status") in {"ok", "skipped_no_context"} else 1
+
+
+def cmd_meeting_prep_scheduler_run(args) -> int:
+    payload = run_meeting_prep_scheduler(
+        planning_date=args.planning_date,
+        live=args.live,
+        notify=args.notify,
+        notification_dry_run=args.notification_dry_run,
+        notification_channel_id=args.notification_channel_id,
+        db_path=args.db_path,
+        note_ledger_db_path=args.note_ledger_db,
+        scheduler_db_path=args.scheduler_db,
+        ledger_path=args.ledger_path,
+        state_file=args.state_file,
+        write_audit=args.write_audit,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Meeting prep scheduler: {payload.get('status')} ({payload.get('reason')})")
+    return 0 if payload.get("status") in {"ok", "degraded", "skipped_weekend", "skipped_no_due_meetings", "skipped_no_context", "skipped_duplicate_run"} else 1
+
+
+def cmd_meeting_prep_recent(args) -> int:
+    payload = list_meeting_prep_runs(limit=args.limit, scheduler_db_path=args.state_db)
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Meeting prep runs: {payload.get('count', 0)}")
+        for run in payload.get("runs") or []:
+            print(f"- {run.get('target_date')} {run.get('status')} {run.get('reason')}")
+    return 0 if payload.get("status") == "ok" else 1
+
+
+def cmd_meeting_prep_readiness(args) -> int:
+    payload = evaluate_meeting_prep_readiness(
+        expected_date=args.expected_date,
+        now_local=args.now_local,
+        scheduler_db_path=args.state_db,
+        state_file=args.state_file,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(payload.get("summary") or f"Meeting prep readiness: {payload.get('status')}")
+    return 0 if payload.get("status") in {"ready_verified", "ready_pending_natural_run"} else 1
+
+
+def cmd_meeting_prep_notion_health(args) -> int:
+    payload = meeting_prep_notion_health()
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Meeting prep Notion: {payload.get('status')} ({payload.get('reason')})")
+    return 0 if payload.get("status") == "ok" else 1
+
+
+def cmd_meeting_prep_notion_schema_ensure(args) -> int:
+    payload = ensure_meeting_prep_database_schema(live=args.live)
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Meeting prep Notion schema: {payload.get('status')} ({payload.get('reason')})")
+    return 0 if payload.get("status") in {"ok", "created", "dry_run"} else 1
+
+
+def cmd_meeting_context_notes_recent(args) -> int:
+    ledger = MeetingContextNoteLedger(args.ledger_db)
+    notes = ledger.recent(limit=args.limit)
+    payload = {"status": "ok", "notes": notes, "note_count": len(notes), "calendar_write_attempted": False, "notion_write_attempted": False}
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Meeting context notes: {payload.get('note_count', 0)}")
+    return 0
+
+
+def cmd_meeting_context_note_capture_run(args) -> int:
+    payload = run_meeting_context_note_capture(
+        live=args.live,
+        acknowledge=not args.no_ack,
+        notification_dry_run=args.notification_dry_run,
+        since_minutes=args.since_minutes,
+        limit=args.limit,
+        ledger_db_path=args.ledger_db,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Meeting context notes captured: {payload.get('notes_recorded', 0)}")
+    return 0 if payload.get("status") in {"ok", "degraded"} else 1
+
+
 def cmd_task_command_capture_run(args) -> int:
     payload = run_task_command_capture_scheduler(
         sources=args.sources,
@@ -4150,6 +4384,15 @@ def main() -> int:
         "notion-task-list": cmd_notion_task_list,
         "task-detect": cmd_task_detect,
         "meeting-task-signals": cmd_meeting_task_signals,
+        "meeting-prep-candidates": cmd_meeting_prep_candidates,
+        "meeting-prep-brief": cmd_meeting_prep_brief,
+        "meeting-prep-scheduler-run": cmd_meeting_prep_scheduler_run,
+        "meeting-prep-recent": cmd_meeting_prep_recent,
+        "meeting-prep-readiness": cmd_meeting_prep_readiness,
+        "meeting-prep-notion-health": cmd_meeting_prep_notion_health,
+        "meeting-prep-notion-schema-ensure": cmd_meeting_prep_notion_schema_ensure,
+        "meeting-context-notes-recent": cmd_meeting_context_notes_recent,
+        "meeting-context-note-capture-run": cmd_meeting_context_note_capture_run,
         "task-detector-llm-health": cmd_task_detector_llm_health,
         "task-reminders-run": cmd_task_reminders_run,
         "task-lifecycle-run": cmd_task_lifecycle_run,

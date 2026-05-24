@@ -22,6 +22,8 @@ from assistant_learning_readiness import evaluate_assistant_learning_readiness
 from assistant_scheduler_health import evaluate_all_scheduler_jobs
 from assistant_scheduler_state import DEFAULT_SCHEDULER_DB_PATH, AssistantSchedulerState
 from daily_personal_briefing_readiness import evaluate_daily_personal_briefing_readiness
+from meeting_prep_readiness import evaluate_meeting_prep_readiness
+from meeting_prep_notion_manager import meeting_prep_notion_health
 from notion_task_manager import notion_task_health
 from weekly_calendar_hygiene import inspect_weekly_calendar_hygiene
 from weekly_personal_review_readiness import evaluate_weekly_personal_review_readiness
@@ -42,6 +44,7 @@ CRITICAL_JOB_NAMES = {
     "daily_personal_briefing",
     "assistant_learning",
     "weekly_personal_review",
+    "meeting_prep_briefing",
 }
 ACCEPTABLE_LEARNING_STATUSES = {"ready_verified", "calibration_pending"}
 PENDING_GATE_STATUS = "ready_pending_natural_run"
@@ -61,11 +64,13 @@ def build_assistant_production_readiness(
     daily_readiness_payload: dict[str, Any] | None = None,
     weekly_readiness_payload: dict[str, Any] | None = None,
     learning_readiness_payload: dict[str, Any] | None = None,
+    meeting_prep_readiness_payload: dict[str, Any] | None = None,
     calendar_write_health_payload: dict[str, Any] | None = None,
     calendar_hygiene_payload: dict[str, Any] | None = None,
     dead_letters: list[dict[str, Any]] | None = None,
     agentmail_health_payload: dict[str, Any] | None = None,
     notion_health_payload: dict[str, Any] | None = None,
+    meeting_prep_notion_health_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     tz = ZoneInfo(TIMEZONE)
     now = _parse_datetime(now_local, tz=tz) if now_local else datetime.now(tz)
@@ -98,6 +103,11 @@ def build_assistant_production_readiness(
         learning_db_path=learning_db_path,
         audit_log_path=audit_log_path,
     )
+    meeting_prep = meeting_prep_readiness_payload or evaluate_meeting_prep_readiness(
+        expected_date=target_date,
+        now_local=now,
+        scheduler_db_path=scheduler_db,
+    )
     cal_health = calendar_write_health_payload or calendar_write_health(
         db_path=calendar_db_path,
         ledger_path=audit_log_path,
@@ -113,6 +123,7 @@ def build_assistant_production_readiness(
     open_dead_letters = dead_letters if dead_letters is not None else _read_open_dead_letters(scheduler_db)
     agentmail = agentmail_health_payload or build_agentmail_bridge_health(run_tests=False, read_launchctl=True)
     notion = notion_health_payload or notion_task_health()
+    meeting_prep_notion = meeting_prep_notion_health_payload or meeting_prep_notion_health()
 
     not_ready_items: list[dict[str, Any]] = []
     manual_review_items: list[dict[str, Any]] = []
@@ -122,11 +133,13 @@ def build_assistant_production_readiness(
     _classify_gate("daily_personal_briefing", daily, pending_gates, not_ready_items, manual_review_items)
     _classify_gate("weekly_personal_review", weekly, pending_gates, not_ready_items, manual_review_items)
     _classify_gate("assistant_learning", learning, pending_gates, not_ready_items, manual_review_items, acceptable=ACCEPTABLE_LEARNING_STATUSES)
+    _classify_gate("meeting_prep_briefing", meeting_prep, pending_gates, not_ready_items, manual_review_items)
     _classify_calendar_health(cal_health, not_ready_items)
     _classify_calendar_hygiene(hygiene, manual_review_items, not_ready_items)
     _classify_dead_letters(open_dead_letters, manual_review_items)
     _classify_optional_health("agentmail_bridge", agentmail, not_ready_items, manual_review_items)
     _classify_optional_health("notion_task_health", notion, not_ready_items, manual_review_items)
+    _classify_optional_health("meeting_prep_notion_health", meeting_prep_notion, not_ready_items, manual_review_items)
 
     if not_ready_items:
         status = NOT_READY
@@ -152,11 +165,13 @@ def build_assistant_production_readiness(
             "daily_personal_briefing": _safe_gate(daily),
             "weekly_personal_review": _safe_gate(weekly),
             "assistant_learning": _safe_gate(learning),
+            "meeting_prep_briefing": _safe_gate(meeting_prep),
             "calendar_write_health": _safe_calendar_health(cal_health),
             "calendar_hygiene": _safe_hygiene(hygiene),
             "dead_letters": {"open_count": len(open_dead_letters), "items": [_safe_dead_letter(item) for item in open_dead_letters[:10]]},
             "agentmail_bridge": _safe_health(agentmail),
             "notion_task_health": _safe_health(notion),
+            "meeting_prep_notion_health": _safe_health(meeting_prep_notion),
         },
         "safe_recovery": _safe_recovery_summary(hygiene, open_dead_letters),
         "calendar_write_attempted": False,

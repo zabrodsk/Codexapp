@@ -34,6 +34,8 @@ from assistant_scheduler_health import (
     ASSISTANT_LEARNING_SSH_BRIDGE_PROGRAM_ARGUMENTS,
     WEEKLY_PERSONAL_REVIEW_SPEC,
     WEEKLY_PERSONAL_REVIEW_SSH_BRIDGE_PROGRAM_ARGUMENTS,
+    MEETING_PREP_BRIEFING_SPEC,
+    MEETING_PREP_BRIEFING_SSH_BRIDGE_PROGRAM_ARGUMENTS,
     TRAINING_CALENDAR_DIRECT_PROGRAM_ARGUMENTS,
     TRAINING_CALENDAR_BOOKING_SPEC,
     TRAINING_CALENDAR_SSH_BRIDGE_PROGRAM_ARGUMENTS,
@@ -756,3 +758,13 @@ def test_weekly_personal_review_launchagent_spec_matches_production_schedule():
     assert spec.launchagent.minute == 15
     assert launchagent_execution_mode(WEEKLY_PERSONAL_REVIEW_SSH_BRIDGE_PROGRAM_ARGUMENTS) == "localhost_ssh_bridge"
     assert "weekly_personal_review" in JOB_REGISTRY
+
+
+def test_meeting_prep_launchagent_spec_matches_production_schedule():
+    spec = MEETING_PREP_BRIEFING_SPEC
+
+    assert spec.job_name == "meeting_prep_briefing"
+    assert spec.launchagent.label == "com.openclaw.rocky-meeting-prep-briefing"
+    assert spec.launchagent.start_interval_seconds == 900
+    assert launchagent_execution_mode(MEETING_PREP_BRIEFING_SSH_BRIDGE_PROGRAM_ARGUMENTS) == "localhost_ssh_bridge"
+    assert JOB_REGISTRY["meeting_prep_briefing"] is MEETING_PREP_BRIEFING_SPEC

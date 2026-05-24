@@ -27,6 +27,15 @@ from rocky_runtime_tools import (
     cmd_notion_task_health,
     cmd_notion_task_schema_ensure,
     cmd_meeting_task_signals,
+    cmd_meeting_prep_candidates,
+    cmd_meeting_prep_brief,
+    cmd_meeting_prep_scheduler_run,
+    cmd_meeting_prep_recent,
+    cmd_meeting_prep_readiness,
+    cmd_meeting_prep_notion_health,
+    cmd_meeting_prep_notion_schema_ensure,
+    cmd_meeting_context_notes_recent,
+    cmd_meeting_context_note_capture_run,
     cmd_task_detect,
     cmd_task_command_apply,
     cmd_task_command_capture_run,
@@ -161,6 +170,15 @@ def test_parser_includes_assistant_commands():
     assert parser.parse_args(["notion-task-schema-ensure"]).command == "notion-task-schema-ensure"
     assert parser.parse_args(["task-detect"]).command == "task-detect"
     assert parser.parse_args(["meeting-task-signals"]).command == "meeting-task-signals"
+    assert parser.parse_args(["meeting-prep-candidates"]).command == "meeting-prep-candidates"
+    assert parser.parse_args(["meeting-prep-brief", "--meeting-key", "meeting:test"]).command == "meeting-prep-brief"
+    assert parser.parse_args(["meeting-prep-scheduler-run", "--live", "--notify"]).command == "meeting-prep-scheduler-run"
+    assert parser.parse_args(["meeting-prep-recent"]).command == "meeting-prep-recent"
+    assert parser.parse_args(["meeting-prep-readiness", "--expected-date", "2026-05-25"]).command == "meeting-prep-readiness"
+    assert parser.parse_args(["meeting-prep-notion-health"]).command == "meeting-prep-notion-health"
+    assert parser.parse_args(["meeting-prep-notion-schema-ensure", "--live"]).command == "meeting-prep-notion-schema-ensure"
+    assert parser.parse_args(["meeting-context-notes-recent"]).command == "meeting-context-notes-recent"
+    assert parser.parse_args(["meeting-context-note-capture-run", "--live"]).command == "meeting-context-note-capture-run"
     assert parser.parse_args(["task-detector-llm-health"]).command == "task-detector-llm-health"
     assert parser.parse_args(["task-reminders-run"]).command == "task-reminders-run"
     assert parser.parse_args(["task-lifecycle-run"]).command == "task-lifecycle-run"
