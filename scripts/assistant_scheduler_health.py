@@ -598,6 +598,64 @@ def _max_status(statuses: list[str]) -> str:
     return max(statuses, key=lambda item: order.get(item, 1))
 
 
+def _daily_personal_natural_run_status(
+    spec: SchedulerJobSpec,
+    *,
+    now: datetime,
+    launchagent: dict[str, Any],
+    logs: dict[str, Any],
+    helper_state: dict[str, Any],
+) -> dict[str, Any]:
+    first_expected = _parse_iso(spec.first_expected_run_after)
+    if not first_expected:
+        return {"status": "not_configured"}
+    first_expected = first_expected.astimezone(ZoneInfo(spec.launchagent.timezone))
+    grace_at = first_expected + timedelta(minutes=spec.missing_log_grace_minutes)
+    helper_payload = helper_state.get("state") or {}
+    launchctl = launchagent.get("launchctl") or {}
+    target_date = str(helper_payload.get("target_date") or "")
+    expected_date = first_expected.date().isoformat()
+    last_status = str(helper_payload.get("last_status") or "")
+    last_run_at = _parse_iso(str(helper_payload.get("last_run_at") or "")) if helper_payload.get("last_run_at") else None
+    notification_status = str(helper_payload.get("notification_status") or "")
+    last_exit_code = launchctl.get("last_exit_code")
+    if now < grace_at:
+        return {
+            "status": "pending_first_weekday_run",
+            "expected_run": first_expected.isoformat(),
+            "grace_until": grace_at.isoformat(),
+            "summary": "First weekday natural run has not reached its grace window yet.",
+        }
+    verified = (
+        target_date == expected_date
+        and bool(last_run_at and last_run_at >= first_expected)
+        and last_status in {"ok", "degraded"}
+        and notification_status in {"posted", "dry_run", "failed"}
+        and int(logs.get("stderr_size") or 0) == 0
+        and last_exit_code in {0, "0"}
+    )
+    if verified:
+        return {
+            "status": "natural_run_verified",
+            "expected_run": first_expected.isoformat(),
+            "target_date": target_date,
+            "last_run_at": last_run_at.isoformat() if last_run_at else None,
+            "last_status": last_status,
+            "notification_status": notification_status,
+            "summary": "First weekday natural run is verified.",
+        }
+    return {
+        "status": "natural_run_failed",
+        "expected_run": first_expected.isoformat(),
+        "target_date": target_date,
+        "last_run_at": last_run_at.isoformat() if last_run_at else None,
+        "last_status": last_status,
+        "notification_status": notification_status,
+        "last_exit_code": last_exit_code,
+        "summary": "First weekday natural run is past grace and has not produced a clean verified state.",
+    }
+
+
 def evaluate_scheduler_job(
     spec: SchedulerJobSpec,
     *,
@@ -702,6 +760,23 @@ def evaluate_scheduler_job(
 
     proxy_state = _helper_state(spec)
     signals["helper_state"] = proxy_state
+    if spec.job_name == "daily_personal_briefing":
+        natural_run = _daily_personal_natural_run_status(
+            spec,
+            now=now,
+            launchagent=signals.get("launchagent") or {},
+            logs=logs,
+            helper_state=proxy_state,
+        )
+        signals["natural_run"] = natural_run
+        if natural_run.get("status") == "natural_run_failed":
+            issues.append(
+                {
+                    "status": "degraded",
+                    "failure_class": "daily_personal_briefing_natural_run_failed",
+                    "summary": natural_run.get("summary") or "Daily personal briefing first weekday natural run has not been verified.",
+                }
+            )
     if spec.job_name == "task_command_capture":
         try:
             ledger = TaskCommandLedger()

@@ -11,7 +11,9 @@ Use this skill when Rocky prepares the workday chief-of-staff briefing for Dusan
 
 Inputs are sanitized lane summaries: Apple Calendar events without raw descriptions, TrainingPeaks/training scheduler state, email triage counts and estimates, Notion task summaries, task command ledger summaries, coding briefing summaries, scheduler state, and dead-letter summaries.
 
-Outputs are a concise Discord-ready briefing with these sections: Today, Do first, Protected time, Needs decision, Blocked or risky, Suggested focus, and What Rocky handled.
+Outputs are a concise Discord-ready briefing with these sections: Today, Do first, Protected time, Needs decision, Blocked or risky, Suggested focus, Deferred / did not fit, and What Rocky handled. The Discord-facing message must preserve section line breaks end to end.
+
+Operator visibility includes `daily-personal-briefing-recent --json`, which shows sanitized recent run history from the assistant scheduler state store.
 
 ## Safety
 
@@ -25,4 +27,9 @@ Outputs are a concise Discord-ready briefing with these sections: Today, Do firs
 ```bash
 /Users/clawdbot/.openclaw/workspace/.venv/bin/python scripts/rocky_runtime_tools.py \
   daily-personal-briefing-run --live --notify --apply-safe-bookings --json
+```
+
+```bash
+/Users/clawdbot/.openclaw/workspace/.venv/bin/python scripts/rocky_runtime_tools.py \
+  daily-personal-briefing-recent --limit 5 --json
 ```

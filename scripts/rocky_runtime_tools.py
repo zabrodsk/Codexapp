@@ -104,7 +104,7 @@ from coding_session_inspector import inspect_coding_signals
 from coding_signal_sync import run_sync as run_coding_signal_sync
 from coding_work_briefing_builder import build_coding_work_briefing
 from coding_work_scheduler import run_coding_work_scheduler
-from daily_personal_briefing_scheduler import run_daily_personal_briefing, run_daily_personal_briefing_scheduler
+from daily_personal_briefing_scheduler import explain_daily_priorities, list_daily_personal_briefing_runs, run_daily_personal_briefing, run_daily_personal_briefing_scheduler
 from daily_priority_arbitrator import arbitrate_daily_priorities
 from email_triage_live_booking import book_email_triage_proposal
 from email_triage_proposal_engine import build_email_triage_proposals
@@ -1142,6 +1142,16 @@ def build_parser() -> argparse.ArgumentParser:
     daily_arbitrate.add_argument("--use-llm", action="store_true", dest="use_llm")
     daily_arbitrate.add_argument("--json", action="store_true", dest="json_output")
 
+    daily_explain = sub.add_parser(
+        "daily-priority-explain",
+        help="Explain Rocky's deterministic daily priority choices for a planning date.",
+    )
+    daily_explain.add_argument("--planning-date", dest="planning_date")
+    daily_explain.add_argument("--db-path", dest="db_path")
+    daily_explain.add_argument("--scheduler-db", dest="scheduler_db")
+    daily_explain.add_argument("--use-llm", action="store_true", dest="use_llm")
+    daily_explain.add_argument("--json", action="store_true", dest="json_output")
+
     daily_scheduler = sub.add_parser(
         "daily-personal-briefing-run",
         help="Run Rocky's daily personal briefing scheduler with optional safe booking actions.",
@@ -1161,6 +1171,14 @@ def build_parser() -> argparse.ArgumentParser:
     daily_scheduler.add_argument("--no-write-audit", action="store_false", dest="write_audit", default=True)
     daily_scheduler.add_argument("--use-llm", action="store_true", dest="use_llm")
     daily_scheduler.add_argument("--json", action="store_true", dest="json_output")
+
+    daily_recent = sub.add_parser(
+        "daily-personal-briefing-recent",
+        help="Show recent sanitized Rocky daily briefing scheduler runs.",
+    )
+    daily_recent.add_argument("--limit", type=int, default=20)
+    daily_recent.add_argument("--state-db", dest="state_db")
+    daily_recent.add_argument("--json", action="store_true", dest="json_output")
 
     notification_dispatch = sub.add_parser(
         "assistant-notification-dispatch",
@@ -2957,6 +2975,20 @@ def cmd_daily_priority_arbitrate(args) -> int:
     return 0 if payload.get("status") in {"ok", "degraded"} else 1
 
 
+def cmd_daily_priority_explain(args) -> int:
+    payload = explain_daily_priorities(
+        planning_date=args.planning_date,
+        db_path=args.db_path,
+        scheduler_db_path=args.scheduler_db,
+        use_llm=args.use_llm,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Daily priority explanation: {payload.get('status')} ({len(payload.get('explanations') or [])} item(s))")
+    return 0 if payload.get("status") in {"ok", "degraded"} else 1
+
+
 def cmd_daily_personal_briefing_run(args) -> int:
     payload = run_daily_personal_briefing_scheduler(
         planning_date=args.planning_date,
@@ -2979,6 +3011,17 @@ def cmd_daily_personal_briefing_run(args) -> int:
     else:
         print(f"Daily personal briefing: {payload.get('status')} ({payload.get('reason')})")
     return 0 if payload.get("status") in {"ok", "degraded", "skipped_weekend_briefing", "skipped_duplicate_run"} else 1
+
+
+def cmd_daily_personal_briefing_recent(args) -> int:
+    payload = list_daily_personal_briefing_runs(limit=args.limit, scheduler_db_path=args.state_db)
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Daily personal briefing runs: {payload.get('count', 0)}")
+        for run in payload.get("runs") or []:
+            print(f"- {run.get('target_date')} {run.get('status')} {run.get('reason')}")
+    return 0 if payload.get("status") == "ok" else 1
 
 
 def cmd_assistant_notification_dispatch(args) -> int:
@@ -3669,7 +3712,9 @@ def main() -> int:
         "coding-work-llm-health": cmd_coding_work_llm_health,
         "daily-personal-briefing": cmd_daily_personal_briefing,
         "daily-priority-arbitrate": cmd_daily_priority_arbitrate,
+        "daily-priority-explain": cmd_daily_priority_explain,
         "daily-personal-briefing-run": cmd_daily_personal_briefing_run,
+        "daily-personal-briefing-recent": cmd_daily_personal_briefing_recent,
         "task-command-apply": cmd_task_command_apply,
         "task-command-capture-run": cmd_task_command_capture_run,
         "task-command-recent": cmd_task_command_recent,

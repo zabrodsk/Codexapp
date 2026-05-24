@@ -49,6 +49,8 @@ from rocky_runtime_tools import (
     cmd_training_calendar_book,
     cmd_training_calendar_reconcile,
     cmd_training_calendar_scheduler_run,
+    cmd_daily_personal_briefing_recent,
+    cmd_daily_priority_explain,
     cmd_assistant_notification_dispatch,
     cmd_agentmail_bridge_health,
     cmd_trainingpeaks_ics_preview,
@@ -161,7 +163,9 @@ def test_parser_includes_assistant_commands():
     assert parser.parse_args(["coding-work-llm-health"]).command == "coding-work-llm-health"
     assert parser.parse_args(["daily-personal-briefing"]).command == "daily-personal-briefing"
     assert parser.parse_args(["daily-priority-arbitrate", "--signals-file", "/tmp/signals.json"]).command == "daily-priority-arbitrate"
+    assert parser.parse_args(["daily-priority-explain", "--planning-date", "2026-05-25"]).command == "daily-priority-explain"
     assert parser.parse_args(["daily-personal-briefing-run", "--live", "--notify", "--apply-safe-bookings"]).command == "daily-personal-briefing-run"
+    assert parser.parse_args(["daily-personal-briefing-recent"]).command == "daily-personal-briefing-recent"
     assert parser.parse_args(["task-command-apply", "--text", "remember this"]).command == "task-command-apply"
     assert parser.parse_args(["task-command-capture-run"]).command == "task-command-capture-run"
     assert parser.parse_args(["task-command-recent"]).command == "task-command-recent"
@@ -186,11 +190,13 @@ def test_agentmail_bridge_health_runtime_command_is_wired(capsys):
 def test_daily_personal_briefing_runtime_command_is_wired(capsys):
     from rocky_runtime_tools import cmd_daily_personal_briefing, cmd_daily_personal_briefing_run
 
-    with patch("rocky_runtime_tools.run_daily_personal_briefing", return_value={"status": "ok", "discord_message": "Rocky daily brief"}) as brief:
+    message = "Rocky daily brief\n\nToday\n- one"
+    with patch("rocky_runtime_tools.run_daily_personal_briefing", return_value={"status": "ok", "discord_message": message}) as brief:
         result = cmd_daily_personal_briefing(_args(planning_date="2026-05-25", db_path=None, scheduler_db=None, use_llm=False, json_output=True))
     payload = json.loads(capsys.readouterr().out)
     assert result == 0
     assert payload["status"] == "ok"
+    assert payload["discord_message"] == message
     brief.assert_called_once()
 
     with patch("rocky_runtime_tools.run_daily_personal_briefing_scheduler", return_value={"status": "skipped_weekend_briefing", "reason": "weekend"}) as run:
@@ -199,6 +205,22 @@ def test_daily_personal_briefing_runtime_command_is_wired(capsys):
     assert result == 0
     assert payload["status"] == "skipped_weekend_briefing"
     run.assert_called_once()
+
+
+def test_daily_personal_briefing_recent_and_explain_commands_are_wired(capsys):
+    with patch("rocky_runtime_tools.list_daily_personal_briefing_runs", return_value={"status": "ok", "runs": [{"status": "ok"}]}) as recent:
+        result = cmd_daily_personal_briefing_recent(_args(limit=5, state_db="/tmp/state.sqlite3", json_output=True))
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert payload["runs"][0]["status"] == "ok"
+    recent.assert_called_once()
+
+    with patch("rocky_runtime_tools.explain_daily_priorities", return_value={"status": "ok", "explanations": [{"category": "task"}]}) as explain:
+        result = cmd_daily_priority_explain(_args(planning_date="2026-05-25", db_path=None, scheduler_db=None, use_llm=False, json_output=True))
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert payload["explanations"][0]["category"] == "task"
+    explain.assert_called_once()
 
 
 def test_task_detector_llm_health_json_uses_safe_helper(capsys):

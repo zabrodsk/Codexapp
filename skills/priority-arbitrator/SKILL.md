@@ -9,7 +9,7 @@ Use this skill when Rocky needs to decide what Dusan should do first today.
 
 ## Contract
 
-Inputs are sanitized daily personal signals. The arbitrator returns top priority, do-first items, protected time, decision needs, risks, suggested focus, what Rocky handled, and optional safe booking actions.
+Inputs are sanitized daily personal signals. The arbitrator returns top priority, do-first items, protected time, decision needs, risks, suggested focus, deferred or did-not-fit work, explicit explanations, what Rocky handled, and optional safe booking actions.
 
 ## Policy
 
@@ -19,10 +19,16 @@ Inputs are sanitized daily personal signals. The arbitrator returns top priority
 - High-confidence coding work outranks routine tasks when there is enough free time.
 - If the day is overloaded, report what does not fit instead of forcing more calendar blocks.
 - Booking actions are only suggestions to existing lane rails; they must not bypass policy, duplicate, conflict, or weekend guards.
+- Deterministic explanation must be useful without LLM arbitration.
 
 ## Example Invocation
 
 ```bash
 /Users/clawdbot/.openclaw/workspace/.venv/bin/python scripts/rocky_runtime_tools.py \
   daily-priority-arbitrate --signals-file /tmp/daily-signals.json --json
+```
+
+```bash
+/Users/clawdbot/.openclaw/workspace/.venv/bin/python scripts/rocky_runtime_tools.py \
+  daily-priority-explain --planning-date 2026-05-25 --json
 ```

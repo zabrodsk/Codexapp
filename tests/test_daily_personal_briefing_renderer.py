@@ -36,3 +36,23 @@ def test_renders_concise_sanitized_discord_briefing():
     assert "token" not in message.lower()
     assert "secret" not in message.lower()
     assert len(message) < 1900
+
+
+def test_discord_briefing_preserves_section_line_breaks():
+    payload = render_daily_personal_briefing(
+        {
+            "planning_date": "2026-05-25",
+            "calendar": {"event_count": 1, "free_windows": []},
+        },
+        {
+            "top_priority": {"category": "task", "title": "Review Monday plan"},
+            "do_first": [{"category": "task", "title": "Review Monday plan", "reason": "High"}],
+            "deferred_or_did_not_fit": [{"category": "coding", "title": "Rocky", "reason": "Urgent task took priority"}],
+        },
+    )
+
+    message = payload["discord_message"]
+    assert "\nToday\n" in message
+    assert "\nDo first\n" in message
+    assert "\nDeferred / did not fit\n" in message
+    assert "Rocky daily brief - 2026-05-25\n\nToday\n" in message

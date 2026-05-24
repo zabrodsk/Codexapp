@@ -43,12 +43,15 @@ def _deterministic_arbitration(signals: dict[str, Any]) -> dict[str, Any]:
     needs_decision: list[dict[str, Any]] = []
     blocked_or_risky: list[dict[str, Any]] = []
     suggested_focus: list[dict[str, Any]] = []
+    explanations: list[dict[str, Any]] = []
+    deferred: list[dict[str, Any]] = []
     handled: list[str] = []
     actions: list[dict[str, Any]] = []
 
     training = signals.get("training") or {}
     if training.get("summary"):
         protected_time.append(str(training.get("summary")))
+        explanations.append({"category": "training", "decision": "surfaced", "reason": "Training status is shown before work planning.", "title": training.get("summary")})
 
     dead = signals.get("dead_letters") or {}
     if int(dead.get("open_count") or 0) > 0:
@@ -64,10 +67,13 @@ def _deterministic_arbitration(signals: dict[str, Any]) -> dict[str, Any]:
     if attention > 0:
         score = 90 if email.get("repair_candidate") else 72
         items.append({"category": "email", "title": f"Handle {attention} unread attention email(s)", "score": score, "reason": f"estimated {email.get('estimated_minutes') or 30} minutes", "idempotency_key": email.get("idempotency_key")})
+        explanations.append({"category": "email", "decision": "do_first", "reason": f"{attention} unread attention email(s) need manual triage.", "idempotency_key": email.get("idempotency_key")})
         if booking_allowed and email.get("repair_candidate") and email.get("idempotency_key"):
             actions.append({"action": "email_triage_repair", "category": "email", "idempotency_key": email.get("idempotency_key"), "reason": "email_triage_scheduler_missing_or_failed"})
+            explanations.append({"category": "email", "decision": "safe_booking_action", "reason": "email triage repair is safe because the normal lane has a proposal and missing or failed state.", "idempotency_key": email.get("idempotency_key")})
     elif email.get("status") in {"skipped_no_attention_emails", "skipped_duplicate"}:
         handled.append("Email triage is already clean or already protected.")
+        explanations.append({"category": "email", "decision": "handled", "reason": "Email triage was clean or already protected."})
 
     tasks = signals.get("tasks") or {}
     urgent_count = int(tasks.get("urgent_count") or 0)
@@ -82,6 +88,7 @@ def _deterministic_arbitration(signals: dict[str, Any]) -> dict[str, Any]:
         items.append(item)
         if priority in {"Urgent", "High"} or due:
             suggested_focus.append({"category": "task", "title": task.get("title"), "next_step": "Clear or schedule this Rocky-tracked task."})
+            explanations.append({"category": "task", "decision": "do_first", "title": task.get("title"), "reason": f"{priority}{' task is due soon' if due else ' priority task'}."})
     if urgent_count or due_count:
         needs_decision.extend([])
 
@@ -95,19 +102,32 @@ def _deterministic_arbitration(signals: dict[str, Any]) -> dict[str, Any]:
         work = {"category": "coding", "title": f"{item.get('project')}: {item.get('title')}", "score": score, "reason": f"confidence {confidence:.2f}"}
         items.append(work)
         suggested_focus.append({"category": "coding", "title": item.get("project") or item.get("title"), "next_step": item.get("recommended_next_step") or "Continue the highest-confidence unfinished coding work."})
+        explanations.append({"category": "coding", "decision": "ranked", "title": item.get("project") or item.get("title"), "reason": f"Fresh coding signal with confidence {confidence:.2f}."})
         if item.get("requires_dusan_decision"):
             needs_decision.append({"category": "coding", "title": item.get("title"), "reason": "coding item requires Dusan decision"})
     if booking_allowed and not actions and coding.get("proposal_idempotency_keys") and coding_items:
         top_coding = coding_items[0]
         if float(top_coding.get("confidence") or 0) >= 0.75 and urgent_count == 0 and attention < 5:
             actions.append({"action": "coding_focus_book", "category": "coding", "idempotency_key": coding.get("proposal_idempotency_keys")[0], "reason": "high_confidence_coding_focus"})
+            explanations.append({"category": "coding", "decision": "safe_booking_action", "title": top_coding.get("project") or top_coding.get("title"), "reason": "High-confidence coding focus and no higher-priority email or urgent task pressure.", "idempotency_key": coding.get("proposal_idempotency_keys")[0]})
+        else:
+            deferred.append({"category": "coding", "decision": "deferred", "title": top_coding.get("project") or top_coding.get("title"), "reason": "Higher-priority email or urgent tasks took precedence, or confidence was below the auto-book threshold."})
+            explanations.append({"category": "coding", "decision": "deferred", "title": top_coding.get("project") or top_coding.get("title"), "reason": "Coding focus was not auto-booked because another safe booking action or higher-priority signal won."})
+    elif coding.get("proposal_idempotency_keys") and coding_items and actions:
+        top_coding = coding_items[0]
+        deferred.append({"category": "coding", "decision": "deferred", "title": top_coding.get("project") or top_coding.get("title"), "reason": "Another safe booking action had priority."})
+        explanations.append({"category": "coding", "decision": "deferred", "title": top_coding.get("project") or top_coding.get("title"), "reason": "Coding was briefed but not booked because email or task action had priority."})
 
     task_focus = signals.get("task_focus") or {}
     if booking_allowed and not actions and task_focus.get("status") == "proposal" and task_focus.get("idempotency_key"):
         actions.append({"action": "task_focus_book", "category": "task", "idempotency_key": task_focus.get("idempotency_key"), "reason": "urgent_task_focus_available"})
+        explanations.append({"category": "task", "decision": "safe_booking_action", "reason": "Task focus proposal is available and no higher-priority safe booking action was selected.", "idempotency_key": task_focus.get("idempotency_key")})
+    elif task_focus.get("status") == "proposal" and actions:
+        deferred.append({"category": "task", "decision": "deferred", "title": "Task focus block", "reason": "Another safe booking action had priority."})
 
     if not booking_allowed:
         blocked_or_risky.append({"category": "policy", "title": "Proactive booking disabled", "reason": signals.get("booking_policy_reason") or "not_a_booking_day"})
+        explanations.append({"category": "policy", "decision": "blocked", "reason": signals.get("booking_policy_reason") or "not_a_booking_day"})
         actions = []
 
     free_minutes = int((signals.get("calendar") or {}).get("free_minutes_after_noon") or 0)
@@ -115,6 +135,8 @@ def _deterministic_arbitration(signals: dict[str, Any]) -> dict[str, Any]:
     overload = requested_minutes > max(0, free_minutes)
     if overload:
         blocked_or_risky.append({"category": "overload", "title": "More useful work than free calendar space", "reason": f"requested {requested_minutes} min, free {free_minutes} min"})
+        deferred.append({"category": "overload", "decision": "deferred", "title": "Some useful work will not fit", "reason": f"requested {requested_minutes} min, free {free_minutes} min"})
+        explanations.append({"category": "calendar", "decision": "overloaded", "reason": f"Requested work exceeds free time after noon ({requested_minutes} min vs {free_minutes} min)."})
 
     items.sort(key=lambda item: -int(item.get("score") or 0))
     top = items[0] if items else {"category": "calendar", "title": "Follow existing meetings and protected blocks", "score": 40, "reason": "no stronger signal"}
@@ -129,6 +151,8 @@ def _deterministic_arbitration(signals: dict[str, Any]) -> dict[str, Any]:
         "needs_decision": [_public_item(item) for item in needs_decision[:5]],
         "blocked_or_risky": [_public_item(item) for item in blocked_or_risky[:6]],
         "suggested_focus": [_public_item(item) for item in suggested_focus[:5]],
+        "deferred_or_did_not_fit": [_public_item(item) for item in deferred[:5]],
+        "explanations": [_public_item(item) for item in explanations[:12]],
         "what_rocky_handled": [_safe_text(item, 180) for item in handled[:5]],
         "safe_booking_actions": actions[:2],
         "overloaded": overload,
@@ -153,7 +177,7 @@ def _llm_rank(signals: dict[str, Any], deterministic: dict[str, Any], *, llm_fun
 
 
 def _public_item(item: dict[str, Any]) -> dict[str, Any]:
-    return {key: _redact_payload(item.get(key)) for key in ("category", "title", "reason", "idempotency_key", "next_step") if item.get(key) is not None}
+    return {key: _redact_payload(item.get(key)) for key in ("category", "decision", "title", "reason", "idempotency_key", "next_step") if item.get(key) is not None}
 
 
 def _extract_json(text: str) -> str:

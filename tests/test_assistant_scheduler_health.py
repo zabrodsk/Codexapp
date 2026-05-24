@@ -101,6 +101,48 @@ def _spec(tmp_path, *, first_expected="2026-05-25T09:00:00+02:00"):
     )
 
 
+def _daily_spec(tmp_path, *, first_expected="2026-05-25T11:35:00+02:00"):
+    stdout = tmp_path / "daily.log"
+    stderr = tmp_path / "daily.err.log"
+    plist_path = tmp_path / "com.openclaw.rocky-daily-personal-briefing.plist"
+    launchagent = LaunchAgentSpec(
+        label="com.openclaw.rocky-daily-personal-briefing",
+        plist_path=str(plist_path),
+        program_arguments=DAILY_PERSONAL_BRIEFING_SSH_BRIDGE_PROGRAM_ARGUMENTS,
+        working_directory="/Users/clawdbot/.openclaw/workspace",
+        stdout_path=str(stdout),
+        stderr_path=str(stderr),
+        weekdays=[1, 2, 3, 4, 5],
+        hour=11,
+        minute=35,
+        timezone="Europe/Prague",
+        first_expected_run_after=first_expected,
+    )
+    plist_path.write_bytes(
+        plistlib.dumps(
+            {
+                "Label": launchagent.label,
+                "ProgramArguments": launchagent.program_arguments,
+                "WorkingDirectory": launchagent.working_directory,
+                "StandardOutPath": launchagent.stdout_path,
+                "StandardErrorPath": launchagent.stderr_path,
+                "StartCalendarInterval": [
+                    {"Weekday": day, "Hour": 11, "Minute": 35}
+                    for day in launchagent.weekdays
+                ],
+            }
+        )
+    )
+    return SchedulerJobSpec(
+        job_name="daily_personal_briefing",
+        job_label="Rocky daily personal briefing",
+        workflow="daily_personal_briefing_scheduler",
+        launchagent=launchagent,
+        state_path=str(tmp_path / "daily_state.json"),
+        first_expected_run_after=first_expected,
+    )
+
+
 def test_pending_first_run_is_healthy_and_writes_audit(tmp_path):
     spec = _spec(tmp_path)
     payload = evaluate_scheduler_job(
@@ -234,6 +276,78 @@ def test_daily_personal_briefing_launchagent_spec_matches_production_schedule():
     assert spec.launchagent.hour == 11
     assert spec.launchagent.minute == 35
     assert spec.state_path == "/Users/clawdbot/.openclaw/state/daily_personal_briefing_scheduler.json"
+
+
+def test_daily_personal_briefing_health_reports_pending_natural_run(tmp_path):
+    spec = _daily_spec(tmp_path)
+
+    payload = evaluate_scheduler_job(
+        spec,
+        now=datetime(2026, 5, 25, 11, 0, tzinfo=ZoneInfo("Europe/Prague")),
+        state_db_path=tmp_path / "scheduler.sqlite3",
+        audit_log_path=tmp_path / "assistant_audit.jsonl",
+        launchctl_text="state = not running\nruns = 1\nlast exit code = 0\n",
+    )
+
+    assert payload["status"] == "healthy"
+    assert payload["signals"]["natural_run"]["status"] == "pending_first_weekday_run"
+
+
+def test_daily_personal_briefing_health_verifies_natural_run_after_first_weekday(tmp_path):
+    spec = _daily_spec(tmp_path)
+    Path(spec.state_path).write_text(
+        json.dumps(
+            {
+                "last_run_at": "2026-05-25T09:36:00+00:00",
+                "last_status": "ok",
+                "target_date": "2026-05-25",
+                "notification_status": "posted",
+                "created_count": 0,
+                "skipped_count": 0,
+            }
+        )
+    )
+    Path(spec.launchagent.stdout_path).write_text('{"status":"ok"}\n')
+    Path(spec.launchagent.stderr_path).write_text("")
+
+    payload = evaluate_scheduler_job(
+        spec,
+        now=datetime(2026, 5, 25, 14, 0, tzinfo=ZoneInfo("Europe/Prague")),
+        state_db_path=tmp_path / "scheduler.sqlite3",
+        audit_log_path=tmp_path / "assistant_audit.jsonl",
+        launchctl_text="state = not running\nruns = 2\nlast exit code = 0\n",
+    )
+
+    assert payload["status"] == "healthy"
+    assert payload["signals"]["natural_run"]["status"] == "natural_run_verified"
+
+
+def test_daily_personal_briefing_health_fails_missing_natural_run_after_grace(tmp_path):
+    spec = _daily_spec(tmp_path)
+    Path(spec.state_path).write_text(
+        json.dumps(
+            {
+                "last_run_at": "2026-05-24T07:00:00+00:00",
+                "last_status": "skipped_weekend_briefing",
+                "target_date": "2026-05-24",
+                "notification_status": "skipped",
+            }
+        )
+    )
+    Path(spec.launchagent.stdout_path).write_text('{"status":"skipped_weekend_briefing"}\n')
+    Path(spec.launchagent.stderr_path).write_text("")
+
+    payload = evaluate_scheduler_job(
+        spec,
+        now=datetime(2026, 5, 25, 14, 0, tzinfo=ZoneInfo("Europe/Prague")),
+        state_db_path=tmp_path / "scheduler.sqlite3",
+        audit_log_path=tmp_path / "assistant_audit.jsonl",
+        launchctl_text="state = not running\nruns = 1\nlast exit code = 0\n",
+    )
+
+    assert payload["status"] == "degraded"
+    assert payload["signals"]["natural_run"]["status"] == "natural_run_failed"
+    assert payload["failure_class"] == "daily_personal_briefing_natural_run_failed"
 
 
 def test_training_calendar_health_reports_ssh_bridge_mode(tmp_path):

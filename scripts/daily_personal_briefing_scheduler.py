@@ -66,6 +66,37 @@ def run_daily_personal_briefing(
     })
 
 
+def explain_daily_priorities(
+    *,
+    planning_date: str | date | None = None,
+    db_path: str | Path | None = None,
+    scheduler_db_path: str | Path | None = None,
+    use_llm: bool = False,
+    llm_func: Any | None = None,
+) -> dict[str, Any]:
+    briefing = run_daily_personal_briefing(
+        planning_date=planning_date,
+        db_path=db_path,
+        scheduler_db_path=scheduler_db_path,
+        use_llm=use_llm,
+        llm_func=llm_func,
+    )
+    arbitration = briefing.get("arbitration") or {}
+    return _redact_payload(
+        {
+            "status": briefing.get("status"),
+            "reason": "daily_priority_explanation_built",
+            "planning_date": briefing.get("planning_date"),
+            "top_priority": arbitration.get("top_priority"),
+            "explanations": arbitration.get("explanations") or [],
+            "deferred_or_did_not_fit": arbitration.get("deferred_or_did_not_fit") or [],
+            "safe_booking_actions": arbitration.get("safe_booking_actions") or [],
+            "calendar_write_attempted": False,
+            "notion_write_attempted": False,
+        }
+    )
+
+
 def run_daily_personal_briefing_scheduler(
     *,
     planning_date: str | date | None = None,
@@ -101,7 +132,9 @@ def run_daily_personal_briefing_scheduler(
         metadata={"job_name": JOB_NAME, "planning_date": planning_day.isoformat(), "live": bool(live)},
     )
     if not lock.acquired:
-        return _redact_payload({"status": "skipped_duplicate_run", "reason": lock.reason, "workflow": WORKFLOW, "target_date": planning_day.isoformat(), "run_idempotency_key": run_key, "lock": lock.to_dict(), "calendar_write_attempted": False})
+        payload = _redact_payload({"status": "skipped_duplicate_run", "reason": lock.reason, "workflow": WORKFLOW, "target_date": planning_day.isoformat(), "run_idempotency_key": run_key, "lock": lock.to_dict(), "calendar_write_attempted": False, "notion_write_attempted": False})
+        _record_daily_job_run(payload, scheduler_db_path=scheduler_db_path)
+        return payload
     try:
         if planning_day.weekday() >= 5:
             payload = {
@@ -146,9 +179,10 @@ def run_daily_personal_briefing_scheduler(
             dry_run=notification_dry_run,
             post_func=post_func,
         ) if notify else {"status": "skipped", "reason": "notify_disabled"}
+        notification_failed = notification.get("status") == "failed"
         payload = {
-            "status": "ok" if briefing.get("status") in {"ok", "degraded"} else str(briefing.get("status") or "failed"),
-            "reason": "daily_personal_briefing_completed" if briefing.get("status") == "ok" else str(briefing.get("reason") or "daily_personal_briefing_degraded"),
+            "status": "degraded" if notification_failed else "ok" if briefing.get("status") in {"ok", "degraded"} else str(briefing.get("status") or "failed"),
+            "reason": "daily_personal_briefing_notification_failed" if notification_failed else "daily_personal_briefing_completed" if briefing.get("status") == "ok" else str(briefing.get("reason") or "daily_personal_briefing_degraded"),
             "workflow": WORKFLOW,
             "target_date": planning_day.isoformat(),
             "run_idempotency_key": run_key,
@@ -163,7 +197,7 @@ def run_daily_personal_briefing_scheduler(
             "skipped_count": sum(1 for item in booking_results if str(item.get("status") or "").startswith("skipped")),
             "lock": lock.to_dict(),
         }
-        dead_letter = payload["status"] not in {"ok", "degraded"}
+        dead_letter = payload["status"] not in {"ok", "degraded"} or notification_failed
         return _finish(payload, scheduler_db_path=scheduler_db_path, ledger_path=ledger_path, state_file=state_file, write_audit=write_audit, dead_letter=dead_letter)
     except Exception as exc:
         payload = {"status": "failed", "reason": "daily_personal_briefing_exception", "workflow": WORKFLOW, "target_date": planning_day.isoformat(), "run_idempotency_key": run_key, "error_class": exc.__class__.__name__, "error_hash": _hash_text(str(exc)), "calendar_write_attempted": False, "notion_write_attempted": False}
@@ -206,7 +240,7 @@ def _safe_booking_mode(*, planning_day: date, now: datetime, live: bool, apply_s
 
 
 def _send_discord_briefing(message: str | None, *, channel_id: str, dry_run: bool, post_func: Any | None = None) -> dict[str, Any]:
-    safe_message = _safe_text(message or "Rocky daily brief is empty.", 1850)
+    safe_message = _safe_multiline_text(message or "Rocky daily brief is empty.", 1850)
     if dry_run:
         return {"status": "dry_run", "reason": "notification_dry_run", "channel_id": channel_id, "message_preview": safe_message[:500], "message_sha256": _hash_text(safe_message), "notification_attempted": False}
     try:
@@ -260,6 +294,7 @@ def _finish(payload: dict[str, Any], *, scheduler_db_path: str | Path | None, le
         safe["audit_id"] = event.audit_id
     if state_file:
         _write_state(Path(state_file), safe)
+    _record_daily_job_run(safe, scheduler_db_path=scheduler_db_path)
     return safe
 
 
@@ -280,13 +315,87 @@ def _write_state(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(_redact_payload(state), indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _record_daily_job_run(payload: dict[str, Any], *, scheduler_db_path: str | Path | None) -> dict[str, Any] | None:
+    try:
+        state = AssistantSchedulerState(scheduler_db_path)
+        briefing = payload.get("briefing") or {}
+        rendered = (payload.get("rendered") or {}) if isinstance(payload.get("rendered"), dict) else {}
+        summary_payload = {
+            "kind": "daily_personal_briefing_run",
+            "status": payload.get("status"),
+            "reason": payload.get("reason"),
+            "target_date": payload.get("target_date") or payload.get("planning_date"),
+            "notification_status": (payload.get("notification") or {}).get("status") if isinstance(payload.get("notification"), dict) else None,
+            "safe_booking_mode": payload.get("safe_booking_mode"),
+            "top_priority": ((payload.get("arbitration") or {}).get("top_priority") if isinstance(payload.get("arbitration"), dict) else None),
+            "created_count": payload.get("created_count", 0),
+            "skipped_count": payload.get("skipped_count", 0),
+            "message_sha256": briefing.get("message_sha256") or rendered.get("message_sha256"),
+        }
+        return state.record_job_run(
+            job_name=JOB_NAME,
+            job_label="Rocky daily personal briefing",
+            scheduled_for=str(summary_payload.get("target_date") or ""),
+            finished_at=utc_now_iso(),
+            status=str(payload.get("status") or "unknown"),
+            idempotency_key=str(payload.get("run_idempotency_key") or JOB_NAME),
+            launchagent_label="com.openclaw.rocky-daily-personal-briefing",
+            program="daily_personal_briefing_scheduler.py",
+            failure_class=str(payload.get("reason")) if payload.get("status") in {"failed", "blocked"} else None,
+            summary=json.dumps(_redact_payload(summary_payload), ensure_ascii=False, sort_keys=True),
+            error_hash=payload.get("error_hash"),
+        )
+    except Exception:
+        return None
+
+
+def list_daily_personal_briefing_runs(*, limit: int = 20, scheduler_db_path: str | Path | None = None) -> dict[str, Any]:
+    state = AssistantSchedulerState(scheduler_db_path)
+    rows = state.list_job_runs(job_name=JOB_NAME, limit=max(int(limit) * 3, int(limit)))
+    runs: list[dict[str, Any]] = []
+    for row in rows:
+        if not str(row.get("idempotency_key") or "").startswith("daily-personal-briefing:"):
+            continue
+        summary = _parse_summary(row.get("summary"))
+        runs.append(
+            _redact_payload(
+                {
+                    "run_id": row.get("run_id"),
+                    "status": row.get("status"),
+                    "target_date": summary.get("target_date") or row.get("scheduled_for"),
+                    "reason": summary.get("reason") or row.get("failure_class"),
+                    "notification_status": summary.get("notification_status"),
+                    "safe_booking_mode": summary.get("safe_booking_mode"),
+                    "top_priority": summary.get("top_priority"),
+                    "created_count": summary.get("created_count", 0),
+                    "skipped_count": summary.get("skipped_count", 0),
+                    "message_sha256": summary.get("message_sha256"),
+                    "idempotency_key": row.get("idempotency_key"),
+                    "created_at": row.get("created_at"),
+                    "updated_at": row.get("updated_at"),
+                }
+            )
+        )
+        if len(runs) >= limit:
+            break
+    return {"status": "ok", "count": len(runs), "runs": runs, "calendar_write_attempted": False, "notion_write_attempted": False}
+
+
+def _parse_summary(value: Any) -> dict[str, Any]:
+    try:
+        parsed = json.loads(str(value or "{}"))
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
 def _safe_signals(signals: dict[str, Any]) -> dict[str, Any]:
     return {key: signals.get(key) for key in ("status", "planning_date", "booking_allowed_today", "booking_policy_reason", "calendar", "training", "email", "tasks", "task_focus", "coding", "command_activity", "scheduler", "dead_letters", "errors") if key in signals}
 
 
 def _safe_briefing(briefing: dict[str, Any]) -> dict[str, Any]:
     rendered = briefing.get("rendered") or {}
-    return {"status": briefing.get("status"), "reason": briefing.get("reason"), "planning_date": briefing.get("planning_date"), "message_sha256": rendered.get("message_sha256"), "message_chars": rendered.get("message_chars")}
+    return {"status": briefing.get("status"), "reason": briefing.get("reason"), "planning_date": briefing.get("planning_date"), "message_sha256": rendered.get("message_sha256"), "message_chars": rendered.get("message_chars"), "discord_message": rendered.get("discord_message") or briefing.get("discord_message")}
 
 
 def _safe_result(result: dict[str, Any]) -> dict[str, Any]:
@@ -314,9 +423,25 @@ def _safe_text(value: Any, limit: int = 500) -> str:
     return text[:limit]
 
 
+def _safe_multiline_text(value: Any, limit: int = 500) -> str:
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    safe_lines = []
+    for line in text.split("\n"):
+        safe_lines.append(re.sub(r"[ \t]+", " ", SENSITIVE_TEXT_RE.sub("[redacted]", line)).strip())
+    safe = "\n".join(safe_lines).strip()
+    return safe[:limit]
+
+
 def _redact_payload(value: Any) -> Any:
     if isinstance(value, dict):
-        return {str(key): _redact_payload(item) for key, item in value.items()}
+        safe: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if key_text in {"discord_message", "message_preview"} and isinstance(item, str):
+                safe[key_text] = _safe_multiline_text(item, 2000 if key_text == "discord_message" else 800)
+            else:
+                safe[key_text] = _redact_payload(item)
+        return safe
     if isinstance(value, list):
         return [_redact_payload(item) for item in value]
     if isinstance(value, str):

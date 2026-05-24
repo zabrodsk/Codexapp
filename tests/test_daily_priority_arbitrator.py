@@ -66,3 +66,11 @@ def test_llm_failure_falls_back_to_deterministic_arbitration():
     assert result["llm"]["status"] == "degraded"
     assert result["top_priority"]["category"] == "email"
     assert "token" not in str(result).lower()
+
+
+def test_arbitration_explains_choices_and_deferred_work():
+    result = arbitrate_daily_priorities(_signals())
+
+    assert any(item["category"] == "email" and item["decision"] == "safe_booking_action" for item in result["explanations"])
+    assert any(item["category"] == "coding" and item["decision"] == "deferred" for item in result["deferred_or_did_not_fit"])
+    assert any("email triage repair" in item["reason"] for item in result["explanations"])

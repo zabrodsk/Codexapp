@@ -36,6 +36,9 @@ def render_daily_personal_briefing(signals: dict[str, Any], arbitration: dict[st
         "Suggested focus",
         *_focus_bullets(arbitration.get("suggested_focus") or []),
         "",
+        "Deferred / did not fit",
+        *_bullets(arbitration.get("deferred_or_did_not_fit") or [], empty="Nothing important was deferred by Rocky."),
+        "",
         "What Rocky handled",
         *_plain_bullets(arbitration.get("what_rocky_handled") or [], empty="No autonomous actions completed in this brief."),
     ]

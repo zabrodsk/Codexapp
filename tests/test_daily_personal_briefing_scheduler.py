@@ -89,3 +89,73 @@ def test_scheduler_does_not_live_book_for_fixture_date_that_is_not_today(tmp_pat
     assert result["booking_results"] == []
     email_run.assert_not_called()
     assert result["safe_booking_mode"] == "dry_run_not_today"
+
+
+def test_scheduler_preserves_discord_message_newlines_and_records_recent_run(tmp_path):
+    result = run_daily_personal_briefing_scheduler(
+        planning_date="2026-05-25",
+        now_local="2026-05-25T11:35:00+02:00",
+        live=False,
+        notify=True,
+        notification_dry_run=True,
+        apply_safe_bookings=True,
+        signals_payload=_signals(),
+        scheduler_db_path=tmp_path / "scheduler.sqlite3",
+        ledger_path=tmp_path / "audit.jsonl",
+        state_file=tmp_path / "state.json",
+        write_audit=True,
+    )
+
+    assert result["status"] == "ok"
+    assert "\nToday\n" in result["briefing"]["discord_message"]
+    assert "\nDo first\n" in result["notification"]["message_preview"]
+
+    from daily_personal_briefing_scheduler import list_daily_personal_briefing_runs
+
+    recent = list_daily_personal_briefing_runs(limit=5, scheduler_db_path=tmp_path / "scheduler.sqlite3")
+    assert recent["status"] == "ok"
+    assert recent["runs"][0]["target_date"] == "2026-05-25"
+    assert recent["runs"][0]["notification_status"] == "dry_run"
+    assert recent["runs"][0]["top_priority"]["category"] == "email"
+
+
+def test_duplicate_scheduler_run_is_recorded_in_recent_history(tmp_path):
+    db = tmp_path / "scheduler.sqlite3"
+    first = run_daily_personal_briefing_scheduler(
+        planning_date="2026-05-25",
+        now_local="2026-05-25T11:35:00+02:00",
+        live=False,
+        notify=False,
+        apply_safe_bookings=False,
+        signals_payload=_signals(),
+        scheduler_db_path=db,
+        ledger_path=tmp_path / "audit.jsonl",
+        state_file=tmp_path / "state.json",
+        write_audit=False,
+        lock_ttl_seconds=1800,
+    )
+    with patch(
+        "daily_personal_briefing_scheduler.acquire_run_lock",
+        return_value=type("Lock", (), {"acquired": False, "reason": "duplicate_active", "to_dict": lambda self: {"status": "duplicate_blocked"}})(),
+    ):
+        second = run_daily_personal_briefing_scheduler(
+            planning_date="2026-05-25",
+            now_local="2026-05-25T11:36:00+02:00",
+            live=False,
+            notify=False,
+            apply_safe_bookings=False,
+            signals_payload=_signals(),
+            scheduler_db_path=db,
+            ledger_path=tmp_path / "audit.jsonl",
+            state_file=tmp_path / "state.json",
+            write_audit=False,
+            lock_ttl_seconds=1800,
+        )
+
+    assert first["status"] == "ok"
+    assert second["status"] == "skipped_duplicate_run"
+
+    from daily_personal_briefing_scheduler import list_daily_personal_briefing_runs
+
+    recent = list_daily_personal_briefing_runs(limit=5, scheduler_db_path=db)
+    assert [run["status"] for run in recent["runs"][:2]] == ["skipped_duplicate_run", "ok"]
