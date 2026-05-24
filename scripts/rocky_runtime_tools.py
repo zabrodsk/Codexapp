@@ -96,6 +96,8 @@ from assistant_learning_store import AssistantLearningStore
 from assistant_outcome_observer import collect_outcomes
 from assistant_preference_models import learning_summary
 from assistant_learning_scheduler import run_assistant_learning_scheduler
+from assistant_learning_calibration_review import build_assistant_learning_calibration_review
+from assistant_learning_readiness import evaluate_assistant_learning_readiness
 from assistant_codex_llm import task_llm_health
 from assistant_notification_dispatcher import dispatch_failure_notification
 from assistant_run_lock import smoke_lock_cycle
@@ -171,6 +173,8 @@ RUNTIME_DEPLOYABLE_FILES = (
     "scripts/assistant_preference_models.py",
     "scripts/assistant_outcome_observer.py",
     "scripts/assistant_learning_store.py",
+    "scripts/assistant_learning_calibration_review.py",
+    "scripts/assistant_learning_readiness.py",
     "scripts/coding_signal_sync.py",
     "scripts/coding_session_inspector.py",
     "scripts/coding_repo_inspector.py",
@@ -1249,6 +1253,19 @@ def build_parser() -> argparse.ArgumentParser:
     learning_scheduler.add_argument("--lock-ttl-seconds", type=int, default=1800, dest="lock_ttl_seconds")
     learning_scheduler.add_argument("--no-write-audit", action="store_false", dest="write_audit", default=True)
     learning_scheduler.add_argument("--json", action="store_true", dest="json_output")
+
+    learning_readiness = sub.add_parser("assistant-learning-readiness", help="Read-only production readiness gate for Rocky assistant learning.")
+    learning_readiness.add_argument("--expected-date", dest="expected_date")
+    learning_readiness.add_argument("--now-local", dest="now_local")
+    learning_readiness.add_argument("--state-db", dest="state_db")
+    learning_readiness.add_argument("--learning-db", dest="learning_db")
+    learning_readiness.add_argument("--audit-ledger", dest="audit_ledger")
+    learning_readiness.add_argument("--json", action="store_true", dest="json_output")
+
+    learning_calibration = sub.add_parser("assistant-learning-calibration-review", help="Review Rocky assistant learning calibration evidence.")
+    learning_calibration.add_argument("--learning-db", dest="learning_db")
+    learning_calibration.add_argument("--limit", type=int, default=1000)
+    learning_calibration.add_argument("--json", action="store_true", dest="json_output")
 
     notification_dispatch = sub.add_parser(
         "assistant-notification-dispatch",
@@ -3198,7 +3215,36 @@ def cmd_assistant_learning_scheduler_run(args) -> int:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
     else:
         print(f"Assistant learning scheduler: {payload.get('status')} ({payload.get('reason')})")
-    return 0 if payload.get("status") in {"ok", "degraded_no_active_preferences", "skipped_insufficient_evidence", "skipped_duplicate_run"} else 1
+    return 0 if payload.get("status") in {"ok", "calibration_pending", "degraded_no_active_preferences", "skipped_insufficient_evidence", "skipped_duplicate_run"} else 1
+
+
+def cmd_assistant_learning_readiness(args) -> int:
+    payload = evaluate_assistant_learning_readiness(
+        expected_date=args.expected_date,
+        now_local=args.now_local,
+        scheduler_db_path=args.state_db,
+        learning_db_path=args.learning_db,
+        audit_log_path=args.audit_ledger,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(payload.get("summary") or f"Assistant learning readiness: {payload.get('status')}")
+        for hint in payload.get("recovery_hints") or []:
+            print(f"- {hint}")
+    return 0 if payload.get("status") in {"ready_verified", "calibration_pending"} else 1
+
+
+def cmd_assistant_learning_calibration_review(args) -> int:
+    payload = build_assistant_learning_calibration_review(
+        learning_db_path=args.learning_db,
+        limit=args.limit,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Assistant learning calibration: {payload.get('status')} outcomes={payload.get('outcome_count', 0)} active={payload.get('active_bounded_count', 0)}")
+    return 0 if payload.get("status") in {"ok", "calibration_pending"} else 1
 
 
 def cmd_assistant_notification_dispatch(args) -> int:
@@ -3904,6 +3950,8 @@ def main() -> int:
         "assistant-learning-proposals": cmd_assistant_learning_proposals,
         "assistant-learning-apply": cmd_assistant_learning_apply,
         "assistant-learning-scheduler-run": cmd_assistant_learning_scheduler_run,
+        "assistant-learning-readiness": cmd_assistant_learning_readiness,
+        "assistant-learning-calibration-review": cmd_assistant_learning_calibration_review,
         "assistant-notification-dispatch": cmd_assistant_notification_dispatch,
         "agentmail-bridge-health": cmd_agentmail_bridge_health,
         "assistant-scheduler-health": cmd_assistant_scheduler_health,

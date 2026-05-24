@@ -62,6 +62,8 @@ from rocky_runtime_tools import (
     cmd_assistant_learning_proposals,
     cmd_assistant_learning_apply,
     cmd_assistant_learning_scheduler_run,
+    cmd_assistant_learning_readiness,
+    cmd_assistant_learning_calibration_review,
 )
 
 
@@ -180,6 +182,8 @@ def test_parser_includes_assistant_commands():
     assert parser.parse_args(["assistant-learning-proposals"]).command == "assistant-learning-proposals"
     assert parser.parse_args(["assistant-learning-apply", "--proposal-id", "learning-proposal:1"]).command == "assistant-learning-apply"
     assert parser.parse_args(["assistant-learning-scheduler-run"]).command == "assistant-learning-scheduler-run"
+    assert parser.parse_args(["assistant-learning-readiness", "--expected-date", "2026-05-25"]).command == "assistant-learning-readiness"
+    assert parser.parse_args(["assistant-learning-calibration-review"]).command == "assistant-learning-calibration-review"
     assert parser.parse_args(["task-command-apply", "--text", "remember this"]).command == "task-command-apply"
     assert parser.parse_args(["task-command-capture-run"]).command == "task-command-capture-run"
     assert parser.parse_args(["task-command-recent"]).command == "task-command-recent"
@@ -190,6 +194,16 @@ def test_parser_includes_assistant_commands():
     ).command == "assistant-notification-dispatch"
     assert parser.parse_args(["agentmail-bridge-health"]).command == "agentmail-bridge-health"
 
+
+
+def test_assistant_learning_readiness_runtime_command_is_wired(capsys):
+    with patch("rocky_runtime_tools.evaluate_assistant_learning_readiness", return_value={"status": "calibration_pending", "summary": "Learning clean but waiting", "calendar_write_attempted": False}):
+        result = cmd_assistant_learning_readiness(_args(expected_date="2026-05-25", now_local=None, state_db=None, learning_db=None, audit_ledger=None, json_output=True))
+
+    payload = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert payload["status"] == "calibration_pending"
+    assert payload["calendar_write_attempted"] is False
 
 def test_agentmail_bridge_health_runtime_command_is_wired(capsys):
     with patch("rocky_runtime_tools.build_agentmail_bridge_health", return_value={"status": "ok", "recommendation": "none", "files": [], "secrets_included": False}):
@@ -893,6 +907,8 @@ def test_runtime_deployable_files_include_training_calendar_modules():
     assert "scripts/assistant_outcome_observer.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/assistant_preference_models.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/assistant_learning_scheduler.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/assistant_learning_readiness.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/assistant_learning_calibration_review.py" in RUNTIME_DEPLOYABLE_FILES
     assert "skills/outcome-observer/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
     assert "skills/preference-models/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
     assert "skills/coding-session-inspector/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
@@ -1145,3 +1161,4 @@ def test_assistant_learning_runtime_commands(tmp_path, capsys):
     assert cmd_assistant_learning_proposals(_args(learning_db=str(tmp_path / "learning.sqlite3"), status="all", limit=10, json_output=True)) == 0
     assert cmd_assistant_learning_apply(_args(proposal_id="missing", learning_db=str(tmp_path / "learning.sqlite3"), ledger_path=str(tmp_path / "audit.jsonl"), live=False, json_output=True)) == 2
     assert cmd_assistant_learning_scheduler_run(_args(planning_date="2026-05-25", since_days=7, live=False, notify_failures=False, notification_dry_run=False, notification_channel_id=None, learning_db=str(tmp_path / "learning.sqlite3"), scheduler_db=str(tmp_path / "scheduler.sqlite3"), calendar_state_db=str(tmp_path / "calendar.sqlite3"), ledger_path=str(tmp_path / "audit.jsonl"), state_file=str(tmp_path / "state.json"), lock_ttl_seconds=1800, write_audit=False, json_output=True)) == 0
+    assert cmd_assistant_learning_calibration_review(_args(learning_db=str(tmp_path / "learning.sqlite3"), limit=10, json_output=True)) == 0

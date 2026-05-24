@@ -146,6 +146,48 @@ def _daily_spec(tmp_path, *, first_expected="2026-05-25T11:35:00+02:00"):
     )
 
 
+def _assistant_learning_spec(tmp_path, *, first_expected="2026-05-25T20:45:00+02:00"):
+    stdout = tmp_path / "assistant_learning.log"
+    stderr = tmp_path / "assistant_learning.err.log"
+    plist_path = tmp_path / "com.openclaw.rocky-assistant-learning.plist"
+    launchagent = LaunchAgentSpec(
+        label="com.openclaw.rocky-assistant-learning",
+        plist_path=str(plist_path),
+        program_arguments=ASSISTANT_LEARNING_SSH_BRIDGE_PROGRAM_ARGUMENTS,
+        working_directory="/Users/clawdbot/.openclaw/workspace",
+        stdout_path=str(stdout),
+        stderr_path=str(stderr),
+        weekdays=[1, 2, 3, 4, 5],
+        hour=20,
+        minute=45,
+        timezone="Europe/Prague",
+        first_expected_run_after=first_expected,
+    )
+    plist_path.write_bytes(
+        plistlib.dumps(
+            {
+                "Label": launchagent.label,
+                "ProgramArguments": launchagent.program_arguments,
+                "WorkingDirectory": launchagent.working_directory,
+                "StandardOutPath": launchagent.stdout_path,
+                "StandardErrorPath": launchagent.stderr_path,
+                "StartCalendarInterval": [
+                    {"Weekday": day, "Hour": 20, "Minute": 45}
+                    for day in launchagent.weekdays
+                ],
+            }
+        )
+    )
+    return SchedulerJobSpec(
+        job_name="assistant_learning",
+        job_label="Rocky assistant learning",
+        workflow="assistant_learning_scheduler",
+        launchagent=launchagent,
+        state_path=str(tmp_path / "assistant_learning_state.json"),
+        first_expected_run_after=first_expected,
+    )
+
+
 def test_pending_first_run_is_healthy_and_writes_audit(tmp_path):
     spec = _spec(tmp_path)
     payload = evaluate_scheduler_job(
@@ -625,3 +667,78 @@ def test_assistant_learning_launchagent_spec_matches_production_schedule():
     assert spec.launchagent.hour == 20
     assert spec.launchagent.minute == 45
     assert spec.state_path == "/Users/clawdbot/.openclaw/state/assistant_learning_scheduler.json"
+
+
+def test_assistant_learning_health_reports_pending_natural_run(tmp_path):
+    spec = _assistant_learning_spec(tmp_path)
+
+    with patch("assistant_scheduler_health._localhost_ssh_status", return_value={"status": "ok"}):
+        payload = evaluate_scheduler_job(
+            spec,
+            now=datetime(2026, 5, 25, 21, 0, tzinfo=ZoneInfo("Europe/Prague")),
+            state_db_path=tmp_path / "scheduler.sqlite3",
+            audit_log_path=tmp_path / "assistant_audit.jsonl",
+            launchctl_text="state = not running\nruns = 1\nlast exit code = 0\n",
+        )
+
+    assert payload["status"] == "healthy"
+    assert payload["signals"]["natural_run"]["status"] == "pending_first_weekday_run"
+
+
+def test_assistant_learning_health_verifies_calibration_pending_natural_run(tmp_path):
+    spec = _assistant_learning_spec(tmp_path)
+    Path(spec.state_path).write_text(
+        json.dumps(
+            {
+                "last_run_at": "2026-05-25T18:46:00+00:00",
+                "last_status": "calibration_pending",
+                "target_date": "2026-05-25",
+                "outcome_count": 12,
+                "active_bounded_count": 0,
+                "proposal_count": 3,
+            }
+        )
+    )
+    Path(spec.launchagent.stdout_path).write_text('{"status":"calibration_pending"}\n')
+    Path(spec.launchagent.stderr_path).write_text("")
+
+    with patch("assistant_scheduler_health._localhost_ssh_status", return_value={"status": "ok"}):
+        payload = evaluate_scheduler_job(
+            spec,
+            now=datetime(2026, 5, 25, 23, 0, tzinfo=ZoneInfo("Europe/Prague")),
+            state_db_path=tmp_path / "scheduler.sqlite3",
+            audit_log_path=tmp_path / "assistant_audit.jsonl",
+            launchctl_text="state = not running\nruns = 2\nlast exit code = 0\n",
+        )
+
+    assert payload["status"] == "healthy"
+    assert payload["signals"]["natural_run"]["status"] == "natural_run_verified"
+    assert payload["signals"]["helper_state"]["state"]["active_bounded_count"] == 0
+
+
+def test_assistant_learning_health_fails_missing_natural_run_after_grace(tmp_path):
+    spec = _assistant_learning_spec(tmp_path)
+    Path(spec.state_path).write_text(
+        json.dumps(
+            {
+                "last_run_at": "2026-05-24T10:00:00+00:00",
+                "last_status": "calibration_pending",
+                "target_date": "2026-05-24",
+            }
+        )
+    )
+    Path(spec.launchagent.stdout_path).write_text('{"status":"calibration_pending"}\n')
+    Path(spec.launchagent.stderr_path).write_text("")
+
+    with patch("assistant_scheduler_health._localhost_ssh_status", return_value={"status": "ok"}):
+        payload = evaluate_scheduler_job(
+            spec,
+            now=datetime(2026, 5, 25, 23, 0, tzinfo=ZoneInfo("Europe/Prague")),
+            state_db_path=tmp_path / "scheduler.sqlite3",
+            audit_log_path=tmp_path / "assistant_audit.jsonl",
+            launchctl_text="state = not running\nruns = 1\nlast exit code = 0\n",
+        )
+
+    assert payload["status"] == "degraded"
+    assert payload["signals"]["natural_run"]["status"] == "natural_run_failed"
+    assert payload["failure_class"] == "assistant_learning_natural_run_failed"

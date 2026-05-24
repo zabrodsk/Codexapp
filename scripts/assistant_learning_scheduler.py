@@ -47,8 +47,9 @@ def run_assistant_learning_scheduler(*, planning_date: str | date | None = None,
         models = update_preference_models(db_path=learning_db_path, outcomes=model_input, live=live)
         summary = learning_summary(db_path=learning_db_path)
         status = "ok" if int(models.get("active_bounded_count") or 0) > 0 else "skipped_insufficient_evidence"
-        if live and int(summary.get("active_bounded_count") or 0) == 0 and int(summary.get("outcome_count") or 0) > 0:
-            status = "degraded_no_active_preferences"
+        observed_count = max(int(summary.get("outcome_count") or 0), int(outcomes.get("outcome_count") or 0))
+        if live and int(summary.get("active_bounded_count") or 0) == 0 and observed_count > 0:
+            status = "calibration_pending"
         payload = _base(status, str(models.get("reason") or status), planning_day, run_key, live, outcomes=outcomes, models=models, summary=summary)
         return _finish(payload, scheduler_db_path=scheduler_db_path, ledger_path=ledger_path, state_file=state_file, write_audit=write_audit, dead_letter=False, notify_failures=notify_failures, notification_dry_run=notification_dry_run, notification_channel_id=notification_channel_id)
     except Exception as exc:
@@ -68,7 +69,7 @@ def _finish(payload: dict[str, Any], *, scheduler_db_path: str | Path | None, le
     if state_file:
         _write_state(Path(state_file), safe)
     state = AssistantSchedulerState(scheduler_db_path)
-    state.record_job_run(job_name=JOB_NAME, job_label="Rocky assistant learning", scheduled_for=utc_now_iso(), status="dead_lettered" if dead_letter else ("succeeded" if safe.get("status") in {"ok", "degraded_no_active_preferences", "skipped_insufficient_evidence"} else "unknown"), idempotency_key=str(safe.get("run_idempotency_key") or JOB_NAME), launchagent_label="com.openclaw.rocky-assistant-learning", program="/usr/bin/ssh", failure_class=str(safe.get("reason") or "assistant_learning_failed") if dead_letter else None, summary=str(safe.get("reason") or safe.get("status")), error_hash=safe.get("error_hash"))
+    state.record_job_run(job_name=JOB_NAME, job_label="Rocky assistant learning", scheduled_for=utc_now_iso(), status="dead_lettered" if dead_letter else ("succeeded" if safe.get("status") in {"ok", "calibration_pending", "degraded_no_active_preferences", "skipped_insufficient_evidence"} else "unknown"), idempotency_key=str(safe.get("run_idempotency_key") or JOB_NAME), launchagent_label="com.openclaw.rocky-assistant-learning", program="/usr/bin/ssh", failure_class=str(safe.get("reason") or "assistant_learning_failed") if dead_letter else None, summary=str(safe.get("reason") or safe.get("status")), error_hash=safe.get("error_hash"))
     if dead_letter:
         dead = state.upsert_dead_letter(job_name=JOB_NAME, workflow=WORKFLOW, idempotency_key=str(safe.get("run_idempotency_key") or JOB_NAME), failure_class=str(safe.get("reason") or "assistant_learning_failed"), safe_summary=f"Assistant learning {safe.get('status')}: {safe.get('reason')}", source_refs=["assistant-learning:scheduler"], recovery_hint="Inspect assistant-learning-scheduler-run, assistant-learning-summary, and recent dead letters before rerunning.", error_hash=safe.get("error_hash"))
         safe["dead_letter"] = dead
@@ -130,7 +131,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     payload = run_assistant_learning_scheduler(planning_date=args.planning_date, since_days=args.since_days, live=args.live, notify_failures=args.notify_failures, notification_dry_run=args.notification_dry_run, notification_channel_id=args.notification_channel_id, learning_db_path=args.learning_db, scheduler_db_path=args.scheduler_db, calendar_state_db_path=args.calendar_state_db, ledger_path=args.ledger_path, state_file=args.state_file, lock_ttl_seconds=args.lock_ttl_seconds, write_audit=args.write_audit)
     print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json_output else f"Assistant learning: {payload.get('status')} ({payload.get('reason')})")
-    return 0 if payload.get("status") in {"ok", "degraded_no_active_preferences", "skipped_insufficient_evidence", "skipped_duplicate_run"} else 1
+    return 0 if payload.get("status") in {"ok", "calibration_pending", "degraded_no_active_preferences", "skipped_insufficient_evidence", "skipped_duplicate_run"} else 1
 
 
 if __name__ == "__main__":

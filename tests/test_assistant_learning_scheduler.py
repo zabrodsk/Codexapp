@@ -19,6 +19,15 @@ def test_learning_scheduler_dry_run_does_not_write_learning_db(tmp_path):
     assert state["calendar_write_attempted"] is False
 
 
+def test_learning_scheduler_live_reports_calibration_pending_with_insufficient_evidence(tmp_path):
+    db = tmp_path / "learning.sqlite3"
+    outcomes = {"status": "ok", "outcome_count": 1, "outcomes": [{"lane": "email_triage", "predicted_minutes": 30, "actual_minutes": 45}]}
+    payload = run_assistant_learning_scheduler(planning_date="2026-05-25", live=True, learning_db_path=db, scheduler_db_path=tmp_path / "scheduler.sqlite3", ledger_path=tmp_path / "audit.jsonl", state_file=tmp_path / "state.json", outcomes_payload=outcomes)
+    assert payload["status"] == "calibration_pending"
+    state = json.loads((tmp_path / "state.json").read_text())
+    assert state["last_status"] == "calibration_pending"
+
+
 def test_learning_scheduler_live_updates_models_with_enough_evidence(tmp_path):
     db = tmp_path / "learning.sqlite3"
     outcomes = {"status": "ok", "outcome_count": 5, "outcomes": [{"lane": "email_triage", "predicted_minutes": 30, "actual_minutes": 45} for _ in range(5)]}
