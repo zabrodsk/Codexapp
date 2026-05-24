@@ -36,6 +36,12 @@ from rocky_runtime_tools import (
     cmd_meeting_prep_notion_schema_ensure,
     cmd_meeting_context_notes_recent,
     cmd_meeting_context_note_capture_run,
+    cmd_meeting_outcome_candidates,
+    cmd_meeting_outcome_extract,
+    cmd_meeting_outcome_apply,
+    cmd_meeting_outcome_scheduler_run,
+    cmd_meeting_outcome_recent,
+    cmd_meeting_outcome_readiness,
     cmd_task_detect,
     cmd_task_command_apply,
     cmd_task_command_capture_run,
@@ -179,6 +185,12 @@ def test_parser_includes_assistant_commands():
     assert parser.parse_args(["meeting-prep-notion-schema-ensure", "--live"]).command == "meeting-prep-notion-schema-ensure"
     assert parser.parse_args(["meeting-context-notes-recent"]).command == "meeting-context-notes-recent"
     assert parser.parse_args(["meeting-context-note-capture-run", "--live"]).command == "meeting-context-note-capture-run"
+    assert parser.parse_args(["meeting-outcome-candidates"]).command == "meeting-outcome-candidates"
+    assert parser.parse_args(["meeting-outcome-extract", "--meeting-key", "meeting:test"]).command == "meeting-outcome-extract"
+    assert parser.parse_args(["meeting-outcome-apply", "--meeting-key", "meeting:test", "--live"]).command == "meeting-outcome-apply"
+    assert parser.parse_args(["meeting-outcome-scheduler-run", "--live", "--notify-failures", "--apply-safe-followups"]).command == "meeting-outcome-scheduler-run"
+    assert parser.parse_args(["meeting-outcome-recent"]).command == "meeting-outcome-recent"
+    assert parser.parse_args(["meeting-outcome-readiness", "--expected-date", "2026-05-25"]).command == "meeting-outcome-readiness"
     assert parser.parse_args(["task-detector-llm-health"]).command == "task-detector-llm-health"
     assert parser.parse_args(["task-reminders-run"]).command == "task-reminders-run"
     assert parser.parse_args(["task-lifecycle-run"]).command == "task-lifecycle-run"

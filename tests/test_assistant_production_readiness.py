@@ -22,6 +22,7 @@ def _scheduler(status="healthy", *, blocked_job=None):
         "assistant_learning",
         "weekly_personal_review",
         "meeting_prep_briefing",
+        "meeting_outcome_capture",
     ]:
         job_status = "blocked" if name == blocked_job else "healthy"
         jobs.append({"job_name": name, "status": job_status, "failure_class": "launchagent_not_loaded" if job_status == "blocked" else None})
@@ -41,6 +42,7 @@ def test_ready_verified_when_all_lanes_are_clean():
         weekly_readiness_payload=_ready(),
         learning_readiness_payload=_ready("calibration_pending"),
         meeting_prep_readiness_payload=_ready(),
+        meeting_outcome_readiness_payload=_ready(),
         calendar_write_health_payload={"status": "ok", "calendar_write_attempted": False},
         calendar_hygiene_payload={"status": "ok", "issue_count": 0, "calendar_write_attempted": False, "notion_write_attempted": False},
         dead_letters=[],
@@ -63,6 +65,7 @@ def test_pending_natural_runs_are_reported_without_failing():
         weekly_readiness_payload=_ready("ready_pending_natural_run"),
         learning_readiness_payload=_ready("ready_pending_natural_run"),
         meeting_prep_readiness_payload=_ready("ready_pending_natural_run"),
+        meeting_outcome_readiness_payload=_ready("ready_pending_natural_run"),
         calendar_write_health_payload={"status": "ok", "calendar_write_attempted": False},
         calendar_hygiene_payload={"status": "ok", "issue_count": 0, "calendar_write_attempted": False, "notion_write_attempted": False},
         dead_letters=[],
@@ -74,6 +77,7 @@ def test_pending_natural_runs_are_reported_without_failing():
     assert "daily_personal_briefing" in payload["pending_gates"]
     assert "weekly_personal_review" in payload["pending_gates"]
     assert "meeting_prep_briefing" in payload["pending_gates"]
+    assert "meeting_outcome_capture" in payload["pending_gates"]
 
 
 def test_pending_natural_runs_take_precedence_over_hygiene_manual_review():
@@ -85,6 +89,7 @@ def test_pending_natural_runs_take_precedence_over_hygiene_manual_review():
         weekly_readiness_payload=_ready("ready_pending_natural_run"),
         learning_readiness_payload=_ready("ready_pending_natural_run"),
         meeting_prep_readiness_payload=_ready("ready_pending_natural_run"),
+        meeting_outcome_readiness_payload=_ready("ready_pending_natural_run"),
         calendar_write_health_payload={"status": "ok", "calendar_write_attempted": False},
         calendar_hygiene_payload={
             "status": "manual_review_required",
@@ -109,6 +114,7 @@ def test_open_dead_letters_and_orphan_blocks_need_manual_review():
         weekly_readiness_payload=_ready(),
         learning_readiness_payload=_ready("calibration_pending"),
         meeting_prep_readiness_payload=_ready(),
+        meeting_outcome_readiness_payload=_ready(),
         calendar_write_health_payload={"status": "ok", "calendar_write_attempted": False},
         calendar_hygiene_payload={
             "status": "manual_review_required",
@@ -134,6 +140,7 @@ def test_blocked_scheduler_or_calendar_health_is_not_ready():
         weekly_readiness_payload=_ready(),
         learning_readiness_payload=_ready("calibration_pending"),
         meeting_prep_readiness_payload=_ready(),
+        meeting_outcome_readiness_payload=_ready(),
         calendar_write_health_payload={"status": "blocked", "blocked_checks": ["eventkit"], "calendar_write_attempted": False},
         calendar_hygiene_payload={"status": "ok", "issue_count": 0, "calendar_write_attempted": False, "notion_write_attempted": False},
         dead_letters=[],
@@ -153,6 +160,7 @@ def test_readiness_output_redacts_sensitive_content():
         weekly_readiness_payload=_ready(),
         learning_readiness_payload=_ready("calibration_pending"),
         meeting_prep_readiness_payload=_ready(),
+        meeting_outcome_readiness_payload=_ready(),
         calendar_write_health_payload={"status": "ok", "calendar_write_attempted": False},
         calendar_hygiene_payload={"status": "ok", "issue_count": 0, "calendar_write_attempted": False, "notion_write_attempted": False, "raw_description": "cookie abc"},
         dead_letters=[],

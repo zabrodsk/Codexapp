@@ -36,6 +36,9 @@ from assistant_scheduler_health import (
     WEEKLY_PERSONAL_REVIEW_SSH_BRIDGE_PROGRAM_ARGUMENTS,
     MEETING_PREP_BRIEFING_SPEC,
     MEETING_PREP_BRIEFING_SSH_BRIDGE_PROGRAM_ARGUMENTS,
+    MEETING_OUTCOME_CAPTURE_SPEC,
+    MEETING_OUTCOME_CAPTURE_SSH_BRIDGE_PROGRAM_ARGUMENTS,
+    MEETING_OUTCOME_CAPTURE_DIRECT_PROGRAM_ARGUMENTS,
     TRAINING_CALENDAR_DIRECT_PROGRAM_ARGUMENTS,
     TRAINING_CALENDAR_BOOKING_SPEC,
     TRAINING_CALENDAR_SSH_BRIDGE_PROGRAM_ARGUMENTS,
@@ -768,3 +771,14 @@ def test_meeting_prep_launchagent_spec_matches_production_schedule():
     assert spec.launchagent.start_interval_seconds == 900
     assert launchagent_execution_mode(MEETING_PREP_BRIEFING_SSH_BRIDGE_PROGRAM_ARGUMENTS) == "localhost_ssh_bridge"
     assert JOB_REGISTRY["meeting_prep_briefing"] is MEETING_PREP_BRIEFING_SPEC
+
+
+def test_meeting_outcome_launchagent_spec_matches_production_schedule():
+    spec = MEETING_OUTCOME_CAPTURE_SPEC
+
+    assert spec.job_name == "meeting_outcome_capture"
+    assert spec.launchagent.label == "com.openclaw.rocky-meeting-outcome-capture"
+    assert spec.launchagent.start_interval_seconds == 1800
+    assert launchagent_execution_mode(MEETING_OUTCOME_CAPTURE_SSH_BRIDGE_PROGRAM_ARGUMENTS) == "localhost_ssh_bridge"
+    assert launchagent_execution_mode(MEETING_OUTCOME_CAPTURE_DIRECT_PROGRAM_ARGUMENTS) == "direct_launchd_python"
+    assert JOB_REGISTRY["meeting_outcome_capture"] is MEETING_OUTCOME_CAPTURE_SPEC

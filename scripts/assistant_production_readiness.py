@@ -23,6 +23,7 @@ from assistant_scheduler_health import evaluate_all_scheduler_jobs
 from assistant_scheduler_state import DEFAULT_SCHEDULER_DB_PATH, AssistantSchedulerState
 from daily_personal_briefing_readiness import evaluate_daily_personal_briefing_readiness
 from meeting_prep_readiness import evaluate_meeting_prep_readiness
+from meeting_outcome_readiness import evaluate_meeting_outcome_readiness
 from meeting_prep_notion_manager import meeting_prep_notion_health
 from notion_task_manager import notion_task_health
 from weekly_calendar_hygiene import inspect_weekly_calendar_hygiene
@@ -45,6 +46,7 @@ CRITICAL_JOB_NAMES = {
     "assistant_learning",
     "weekly_personal_review",
     "meeting_prep_briefing",
+    "meeting_outcome_capture",
 }
 ACCEPTABLE_LEARNING_STATUSES = {"ready_verified", "calibration_pending"}
 PENDING_GATE_STATUS = "ready_pending_natural_run"
@@ -65,6 +67,7 @@ def build_assistant_production_readiness(
     weekly_readiness_payload: dict[str, Any] | None = None,
     learning_readiness_payload: dict[str, Any] | None = None,
     meeting_prep_readiness_payload: dict[str, Any] | None = None,
+    meeting_outcome_readiness_payload: dict[str, Any] | None = None,
     calendar_write_health_payload: dict[str, Any] | None = None,
     calendar_hygiene_payload: dict[str, Any] | None = None,
     dead_letters: list[dict[str, Any]] | None = None,
@@ -108,6 +111,11 @@ def build_assistant_production_readiness(
         now_local=now,
         scheduler_db_path=scheduler_db,
     )
+    meeting_outcome = meeting_outcome_readiness_payload or evaluate_meeting_outcome_readiness(
+        expected_date=target_date,
+        now_local=now,
+        scheduler_db_path=scheduler_db,
+    )
     cal_health = calendar_write_health_payload or calendar_write_health(
         db_path=calendar_db_path,
         ledger_path=audit_log_path,
@@ -134,6 +142,7 @@ def build_assistant_production_readiness(
     _classify_gate("weekly_personal_review", weekly, pending_gates, not_ready_items, manual_review_items)
     _classify_gate("assistant_learning", learning, pending_gates, not_ready_items, manual_review_items, acceptable=ACCEPTABLE_LEARNING_STATUSES)
     _classify_gate("meeting_prep_briefing", meeting_prep, pending_gates, not_ready_items, manual_review_items)
+    _classify_gate("meeting_outcome_capture", meeting_outcome, pending_gates, not_ready_items, manual_review_items)
     _classify_calendar_health(cal_health, not_ready_items)
     _classify_calendar_hygiene(hygiene, manual_review_items, not_ready_items)
     _classify_dead_letters(open_dead_letters, manual_review_items)
@@ -166,6 +175,7 @@ def build_assistant_production_readiness(
             "weekly_personal_review": _safe_gate(weekly),
             "assistant_learning": _safe_gate(learning),
             "meeting_prep_briefing": _safe_gate(meeting_prep),
+            "meeting_outcome_capture": _safe_gate(meeting_outcome),
             "calendar_write_health": _safe_calendar_health(cal_health),
             "calendar_hygiene": _safe_hygiene(hygiene),
             "dead_letters": {"open_count": len(open_dead_letters), "items": [_safe_dead_letter(item) for item in open_dead_letters[:10]]},

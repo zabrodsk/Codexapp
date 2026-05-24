@@ -118,6 +118,13 @@ def meeting_prep_database_properties() -> dict[str, Any]:
         "Questions": {"rich_text": {}},
         "Open loops": {"rich_text": {}},
         "Discord status": {"select": {"options": [{"name": item} for item in ["Not sent", "Dry run", "Sent", "Failed"]]}},
+        "Outcome status": {"select": {"options": [{"name": item} for item in ["Not captured", "Captured", "Applied", "Manual review", "Skipped"]]}},
+        "Outcome summary": {"rich_text": {}},
+        "Decisions": {"rich_text": {}},
+        "Follow-up task refs": {"rich_text": {}},
+        "Memory refs": {"rich_text": {}},
+        "Outcome hash": {"rich_text": {}},
+        "Outcome captured at": {"date": {}},
         "Last sent at": {"date": {}},
         "Message hash": {"rich_text": {}},
         "Updated date": {"date": {}},
@@ -214,6 +221,32 @@ def upsert_meeting_prep_note(
     return {"status": "created", "reason": "meeting_prep_created", "page_id": created.get("id"), "meeting_key": meeting_key, "meeting_prep": summary, "calendar_write_attempted": False, "notion_write_attempted": True}
 
 
+def update_meeting_prep_outcome(
+    outcome: dict[str, Any],
+    *,
+    task_result: dict[str, Any] | None = None,
+    memory_result: dict[str, Any] | None = None,
+    live: bool = False,
+    config: NotionMeetingPrepConfig | None = None,
+    client: Any | None = None,
+) -> dict[str, Any]:
+    """Update an existing meeting prep page with post-meeting outcome metadata."""
+    config = config or load_meeting_prep_config()
+    summary = _safe_outcome_summary(outcome, task_result or {}, memory_result or {})
+    if not live:
+        return {"status": "dry_run", "reason": "live_flag_not_supplied", "meeting_key": outcome.get("meeting_key"), "outcome": summary, "calendar_write_attempted": False, "notion_write_attempted": False}
+    if not config.token_configured or not config.database_configured:
+        return {"status": "blocked", "reason": "notion_meeting_prep_database_not_configured", "meeting_key": outcome.get("meeting_key"), "calendar_write_attempted": False, "notion_write_attempted": False}
+    notion = client or NotionClient(config.token or "")
+    meeting_key = str(outcome.get("meeting_key") or "")
+    existing = _find_page_by_meeting_key(notion, config.database_id or "", meeting_key)
+    if not existing:
+        return {"status": "skipped", "reason": "meeting_prep_page_not_found", "meeting_key": meeting_key, "outcome": summary, "calendar_write_attempted": False, "notion_write_attempted": False}
+    props = meeting_outcome_to_properties(outcome, task_result or {}, memory_result or {})
+    updated = notion.update_page(existing["id"], properties=props)
+    return {"status": "updated", "reason": "meeting_prep_outcome_updated", "page_id": updated.get("id") or existing.get("id"), "meeting_key": meeting_key, "outcome": summary, "calendar_write_attempted": False, "notion_write_attempted": True}
+
+
 def meeting_prep_to_properties(meeting: dict[str, Any], brief_payload: dict[str, Any], *, discord_status: str) -> dict[str, Any]:
     brief = brief_payload.get("brief") or {}
     refs = ", ".join(str(ref) for ref in (brief_payload.get("source_refs") or [])[:20])
@@ -234,6 +267,22 @@ def meeting_prep_to_properties(meeting: dict[str, Any], brief_payload: dict[str,
         "Discord status": _select_prop(discord_status),
         "Last sent at": _date_prop(date.today().isoformat() if discord_status in {"Sent", "Dry run"} else None),
         "Message hash": _rich_text_prop(brief_payload.get("message_sha256")),
+        "Updated date": _date_prop(date.today().isoformat()),
+    }
+
+
+def meeting_outcome_to_properties(outcome: dict[str, Any], task_result: dict[str, Any], memory_result: dict[str, Any]) -> dict[str, Any]:
+    task_refs = ", ".join(str(item.get("page_id") or item.get("dedupe_key") or "") for item in (task_result.get("task_refs") or [])[:12] if isinstance(item, dict))
+    memory_refs = ", ".join(str(item.get("path") or item.get("note_type") or "") for item in (memory_result.get("memory_refs") or [])[:8] if isinstance(item, dict))
+    status = "Applied" if task_result.get("status") == "ok" else "Manual review" if outcome.get("status") == "manual_review_required" else "Captured"
+    return {
+        "Outcome status": _select_prop(status),
+        "Outcome summary": _rich_text_prop(_safe_outcome_text(outcome)),
+        "Decisions": _rich_text_prop("\n".join(str(item) for item in (outcome.get("decisions") or [])[:8])),
+        "Follow-up task refs": _rich_text_prop(task_refs),
+        "Memory refs": _rich_text_prop(memory_refs),
+        "Outcome hash": _rich_text_prop(outcome.get("outcome_hash")),
+        "Outcome captured at": _date_prop(date.today().isoformat()),
         "Updated date": _date_prop(date.today().isoformat()),
     }
 
@@ -281,6 +330,30 @@ def _safe_summary(meeting: dict[str, Any], brief_payload: dict[str, Any]) -> dic
         "status": brief_payload.get("status"),
         "message_sha256": brief_payload.get("message_sha256"),
     }
+
+
+def _safe_outcome_summary(outcome: dict[str, Any], task_result: dict[str, Any], memory_result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "meeting_key": outcome.get("meeting_key"),
+        "title": _safe_text(outcome.get("title"), 180),
+        "status": outcome.get("status"),
+        "outcome_hash": outcome.get("outcome_hash"),
+        "decision_count": outcome.get("decision_count"),
+        "follow_up_count": outcome.get("follow_up_count"),
+        "task_ref_count": len(task_result.get("task_refs") or []),
+        "memory_ref_count": len(memory_result.get("memory_refs") or []),
+    }
+
+
+def _safe_outcome_text(outcome: dict[str, Any]) -> str:
+    parts = []
+    if outcome.get("decisions"):
+        parts.append("Decisions: " + "; ".join(str(item) for item in (outcome.get("decisions") or [])[:3]))
+    if outcome.get("follow_up_tasks"):
+        parts.append("Follow-ups: " + "; ".join(str((item or {}).get("title") or "") for item in (outcome.get("follow_up_tasks") or [])[:5] if isinstance(item, dict)))
+    if outcome.get("relationship_updates"):
+        parts.append("Relationship: " + "; ".join(str(item) for item in (outcome.get("relationship_updates") or [])[:3]))
+    return _safe_text(" | ".join(parts) or outcome.get("reason") or "Meeting outcome captured", 1800)
 
 
 def _hash_text(value: Any) -> str:

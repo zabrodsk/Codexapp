@@ -136,6 +136,9 @@ from meeting_prep_briefing_builder import build_meeting_prep_briefing
 from meeting_prep_notion_manager import ensure_meeting_prep_database_schema, meeting_prep_notion_health, upsert_meeting_prep_note
 from meeting_prep_readiness import evaluate_meeting_prep_readiness
 from meeting_prep_scheduler import build_meeting_prep_candidates, build_meeting_prep_for_key, list_meeting_prep_runs, run_meeting_prep_scheduler
+from meeting_outcome_reader import collect_meeting_outcome_candidates
+from meeting_outcome_scheduler import apply_meeting_outcome, extract_meeting_outcome_for_key, list_meeting_outcome_runs, run_meeting_outcome_scheduler
+from meeting_outcome_readiness import evaluate_meeting_outcome_readiness
 from task_deduper import dedupe_task_candidates
 from task_identity_resolver import resolve_task_identities
 from task_lifecycle_engine import run_task_lifecycle
@@ -226,6 +229,13 @@ RUNTIME_DEPLOYABLE_FILES = (
     "scripts/meeting_prep_notion_manager.py",
     "scripts/meeting_prep_readiness.py",
     "scripts/meeting_prep_scheduler.py",
+    "scripts/meeting_outcome_reader.py",
+    "scripts/meeting_outcome_extractor.py",
+    "scripts/meeting_outcome_ledger.py",
+    "scripts/meeting_outcome_task_applier.py",
+    "scripts/meeting_outcome_scheduler.py",
+    "scripts/meeting_outcome_readiness.py",
+    "scripts/investor_relationship_memory.py",
     "scripts/discord_task_command_reader.py",
     "scripts/email_task_command_reader.py",
     "scripts/task_command_capture_scheduler.py",
@@ -267,6 +277,9 @@ RUNTIME_DEPLOYABLE_FILES = (
     "skills/meeting-context-enricher/SKILL.md",
     "skills/meeting-prep-notion/SKILL.md",
     "skills/discord-context-note-capture/SKILL.md",
+    "skills/meeting-outcome-capture/SKILL.md",
+    "skills/investor-relationship-memory/SKILL.md",
+    "skills/meeting-follow-up-automation/SKILL.md",
     "skills/production-readiness/SKILL.md",
     "skills/safe-recovery/SKILL.md",
     "scripts/training_calendar_live_booking.py",
@@ -1020,6 +1033,83 @@ def build_parser() -> argparse.ArgumentParser:
     meeting_note_capture.add_argument("--ledger-db", dest="ledger_db")
     meeting_note_capture.add_argument("--no-ack", action="store_true", dest="no_ack")
     meeting_note_capture.add_argument("--json", action="store_true", dest="json_output")
+
+    meeting_outcome_candidates = sub.add_parser(
+        "meeting-outcome-candidates",
+        help="List sanitized completed-meeting outcome candidates from structured meeting notes.",
+    )
+    meeting_outcome_candidates.add_argument("--meeting-dir", dest="meeting_dir")
+    meeting_outcome_candidates.add_argument("--since-days", type=int, default=7)
+    meeting_outcome_candidates.add_argument("--limit", type=int, default=20)
+    meeting_outcome_candidates.add_argument("--json", action="store_true", dest="json_output")
+
+    meeting_outcome_extract = sub.add_parser(
+        "meeting-outcome-extract",
+        help="Extract decisions, follow-ups, and relationship updates for one meeting outcome candidate.",
+    )
+    meeting_outcome_extract.add_argument("--meeting-key", required=True, dest="meeting_key")
+    meeting_outcome_extract.add_argument("--meeting-dir", dest="meeting_dir")
+    meeting_outcome_extract.add_argument("--since-days", type=int, default=14)
+    meeting_outcome_extract.add_argument("--no-llm", action="store_true", dest="no_llm")
+    meeting_outcome_extract.add_argument("--json", action="store_true", dest="json_output")
+
+    meeting_outcome_apply = sub.add_parser(
+        "meeting-outcome-apply",
+        help="Apply one meeting outcome through task, memory, and meeting-prep Notion rails.",
+    )
+    meeting_outcome_apply.add_argument("--meeting-key", required=True, dest="meeting_key")
+    meeting_outcome_apply.add_argument("--planning-date", dest="planning_date")
+    meeting_outcome_apply.add_argument("--live", action="store_true")
+    meeting_outcome_apply.add_argument("--apply-safe-followups", action="store_true", dest="apply_safe_followups")
+    meeting_outcome_apply.add_argument("--meeting-dir", dest="meeting_dir")
+    meeting_outcome_apply.add_argument("--since-days", type=int, default=14)
+    meeting_outcome_apply.add_argument("--ledger-db", dest="ledger_db")
+    meeting_outcome_apply.add_argument("--scheduler-db", dest="scheduler_db")
+    meeting_outcome_apply.add_argument("--audit-ledger", dest="audit_ledger")
+    meeting_outcome_apply.add_argument("--notification-dry-run", action="store_true", dest="notification_dry_run")
+    meeting_outcome_apply.add_argument("--no-llm", action="store_true", dest="no_llm")
+    meeting_outcome_apply.add_argument("--json", action="store_true", dest="json_output")
+
+    meeting_outcome_scheduler = sub.add_parser(
+        "meeting-outcome-scheduler-run",
+        help="Run Rocky's meeting outcome capture scheduler.",
+    )
+    meeting_outcome_scheduler.add_argument("--planning-date", dest="planning_date")
+    meeting_outcome_scheduler.add_argument("--live", action="store_true")
+    meeting_outcome_scheduler.add_argument("--notify-failures", action="store_true", dest="notify_failures")
+    meeting_outcome_scheduler.add_argument("--notification-dry-run", action="store_true", dest="notification_dry_run")
+    meeting_outcome_scheduler.add_argument("--notification-channel-id", dest="notification_channel_id")
+    meeting_outcome_scheduler.add_argument("--apply-safe-followups", action="store_true", dest="apply_safe_followups")
+    meeting_outcome_scheduler.add_argument("--meeting-dir", dest="meeting_dir")
+    meeting_outcome_scheduler.add_argument("--since-days", type=int, default=7)
+    meeting_outcome_scheduler.add_argument("--limit", type=int, default=20)
+    meeting_outcome_scheduler.add_argument("--max-meetings", type=int, default=5, dest="max_meetings")
+    meeting_outcome_scheduler.add_argument("--ledger-db", dest="ledger_db")
+    meeting_outcome_scheduler.add_argument("--scheduler-db", dest="scheduler_db")
+    meeting_outcome_scheduler.add_argument("--audit-ledger", dest="audit_ledger")
+    meeting_outcome_scheduler.add_argument("--state-file", default="/Users/clawdbot/.openclaw/state/meeting_outcome_scheduler.json", dest="state_file")
+    meeting_outcome_scheduler.add_argument("--no-write-audit", action="store_false", dest="write_audit", default=True)
+    meeting_outcome_scheduler.add_argument("--no-llm", action="store_true", dest="no_llm")
+    meeting_outcome_scheduler.add_argument("--json", action="store_true", dest="json_output")
+
+    meeting_outcome_recent = sub.add_parser(
+        "meeting-outcome-recent",
+        help="Show recent sanitized meeting outcome capture runs and ledger rows.",
+    )
+    meeting_outcome_recent.add_argument("--limit", type=int, default=20)
+    meeting_outcome_recent.add_argument("--state-db", dest="state_db")
+    meeting_outcome_recent.add_argument("--ledger-db", dest="ledger_db")
+    meeting_outcome_recent.add_argument("--json", action="store_true", dest="json_output")
+
+    meeting_outcome_readiness = sub.add_parser(
+        "meeting-outcome-readiness",
+        help="Read-only production readiness gate for Rocky meeting outcome capture.",
+    )
+    meeting_outcome_readiness.add_argument("--expected-date", dest="expected_date")
+    meeting_outcome_readiness.add_argument("--now-local", dest="now_local")
+    meeting_outcome_readiness.add_argument("--state-db", dest="state_db")
+    meeting_outcome_readiness.add_argument("--state-file", dest="state_file")
+    meeting_outcome_readiness.add_argument("--json", action="store_true", dest="json_output")
 
     task_llm_health = sub.add_parser(
         "task-detector-llm-health",
@@ -3979,6 +4069,89 @@ def cmd_meeting_context_note_capture_run(args) -> int:
     return 0 if payload.get("status") in {"ok", "degraded"} else 1
 
 
+def cmd_meeting_outcome_candidates(args) -> int:
+    payload = collect_meeting_outcome_candidates(meeting_dir=args.meeting_dir, since_days=args.since_days, limit=args.limit)
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Meeting outcome candidates: {payload.get('candidate_count', 0)}")
+    return 0 if payload.get("status") in {"ok", "degraded"} else 1
+
+
+def cmd_meeting_outcome_extract(args) -> int:
+    payload = extract_meeting_outcome_for_key(meeting_key=args.meeting_key, meeting_dir=args.meeting_dir, since_days=args.since_days, use_llm=not args.no_llm)
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Meeting outcome extract: {payload.get('status')} ({payload.get('reason')})")
+    return 0 if payload.get("status") in {"ok", "manual_review_required"} else 1
+
+
+def cmd_meeting_outcome_apply(args) -> int:
+    payload = apply_meeting_outcome(
+        meeting_key=args.meeting_key,
+        live=args.live,
+        apply_safe_followups=args.apply_safe_followups,
+        meeting_dir=args.meeting_dir,
+        since_days=args.since_days,
+        ledger_db_path=args.ledger_db,
+        scheduler_db_path=args.scheduler_db,
+        audit_ledger_path=args.audit_ledger,
+        planning_date=args.planning_date,
+        notification_dry_run=args.notification_dry_run,
+        use_llm=not args.no_llm,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Meeting outcome apply: {payload.get('status')} ({payload.get('reason')})")
+    return 0 if payload.get("status") in {"ok", "dry_run", "manual_review_required"} else 1
+
+
+def cmd_meeting_outcome_scheduler_run(args) -> int:
+    payload = run_meeting_outcome_scheduler(
+        planning_date=args.planning_date,
+        live=args.live,
+        notify_failures=args.notify_failures,
+        notification_dry_run=args.notification_dry_run,
+        notification_channel_id=args.notification_channel_id,
+        apply_safe_followups=args.apply_safe_followups,
+        meeting_dir=args.meeting_dir,
+        since_days=args.since_days,
+        limit=args.limit,
+        max_meetings=args.max_meetings,
+        ledger_db_path=args.ledger_db,
+        scheduler_db_path=args.scheduler_db,
+        audit_ledger_path=args.audit_ledger,
+        state_file=args.state_file,
+        write_audit=args.write_audit,
+        use_llm=not args.no_llm,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Meeting outcome scheduler: {payload.get('status')} ({payload.get('reason')})")
+    return 0 if payload.get("status") in {"ok", "degraded", "skipped_weekend", "skipped_no_outcomes", "skipped_duplicate_run", "skipped_duplicate_outcomes"} else 1
+
+
+def cmd_meeting_outcome_recent(args) -> int:
+    payload = list_meeting_outcome_runs(limit=args.limit, scheduler_db_path=args.state_db, ledger_db_path=args.ledger_db)
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Meeting outcome runs: {payload.get('count', 0)}")
+    return 0 if payload.get("status") == "ok" else 1
+
+
+def cmd_meeting_outcome_readiness(args) -> int:
+    payload = evaluate_meeting_outcome_readiness(expected_date=args.expected_date, now_local=args.now_local, scheduler_db_path=args.state_db, state_file=args.state_file)
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(payload.get("summary") or f"Meeting outcome readiness: {payload.get('status')}")
+    return 0 if payload.get("status") in {"ready_verified", "ready_pending_natural_run"} else 1
+
+
 def cmd_task_command_capture_run(args) -> int:
     payload = run_task_command_capture_scheduler(
         sources=args.sources,
@@ -4393,6 +4566,12 @@ def main() -> int:
         "meeting-prep-notion-schema-ensure": cmd_meeting_prep_notion_schema_ensure,
         "meeting-context-notes-recent": cmd_meeting_context_notes_recent,
         "meeting-context-note-capture-run": cmd_meeting_context_note_capture_run,
+        "meeting-outcome-candidates": cmd_meeting_outcome_candidates,
+        "meeting-outcome-extract": cmd_meeting_outcome_extract,
+        "meeting-outcome-apply": cmd_meeting_outcome_apply,
+        "meeting-outcome-scheduler-run": cmd_meeting_outcome_scheduler_run,
+        "meeting-outcome-recent": cmd_meeting_outcome_recent,
+        "meeting-outcome-readiness": cmd_meeting_outcome_readiness,
         "task-detector-llm-health": cmd_task_detector_llm_health,
         "task-reminders-run": cmd_task_reminders_run,
         "task-lifecycle-run": cmd_task_lifecycle_run,

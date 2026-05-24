@@ -158,6 +158,23 @@ MEETING_PREP_BRIEFING_DIRECT_PROGRAM_ARGUMENTS = [
     "--notify",
     "--json",
 ]
+MEETING_OUTCOME_CAPTURE_SSH_BRIDGE_PROGRAM_ARGUMENTS = [
+    "/usr/bin/ssh",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "StrictHostKeyChecking=accept-new",
+    "localhost",
+    "cd /Users/clawdbot/.openclaw/workspace && /Users/clawdbot/.openclaw/workspace/.venv/bin/python scripts/meeting_outcome_scheduler.py --live --notify-failures --apply-safe-followups --json",
+]
+MEETING_OUTCOME_CAPTURE_DIRECT_PROGRAM_ARGUMENTS = [
+    "/Users/clawdbot/.openclaw/workspace/.venv/bin/python",
+    "/Users/clawdbot/.openclaw/workspace/scripts/meeting_outcome_scheduler.py",
+    "--live",
+    "--notify-failures",
+    "--apply-safe-followups",
+    "--json",
+]
 
 
 @dataclass(frozen=True)
@@ -403,6 +420,29 @@ MEETING_PREP_BRIEFING_SPEC = SchedulerJobSpec(
     missing_log_grace_minutes=30,
 )
 
+MEETING_OUTCOME_CAPTURE_SPEC = SchedulerJobSpec(
+    job_name="meeting_outcome_capture",
+    job_label="Rocky meeting outcome capture",
+    workflow="meeting_outcome_scheduler",
+    launchagent=LaunchAgentSpec(
+        label="com.openclaw.rocky-meeting-outcome-capture",
+        plist_path="/Users/clawdbot/Library/LaunchAgents/com.openclaw.rocky-meeting-outcome-capture.plist",
+        program_arguments=MEETING_OUTCOME_CAPTURE_SSH_BRIDGE_PROGRAM_ARGUMENTS,
+        working_directory="/Users/clawdbot/.openclaw/workspace",
+        stdout_path="/Users/clawdbot/.openclaw/logs/rocky-meeting-outcome-capture.log",
+        stderr_path="/Users/clawdbot/.openclaw/logs/rocky-meeting-outcome-capture.err.log",
+        weekdays=[1, 2, 3, 4, 5],
+        hour=8,
+        minute=0,
+        timezone="Europe/Prague",
+        first_expected_run_after="2026-05-25T08:00:00+02:00",
+        start_interval_seconds=1800,
+    ),
+    state_path="/Users/clawdbot/.openclaw/state/meeting_outcome_scheduler.json",
+    first_expected_run_after="2026-05-25T08:00:00+02:00",
+    missing_log_grace_minutes=60,
+)
+
 JOB_REGISTRY = {
     BETTY_MAIL_TRIAGE_SPEC.job_name: BETTY_MAIL_TRIAGE_SPEC,
     TRAINING_CALENDAR_BOOKING_SPEC.job_name: TRAINING_CALENDAR_BOOKING_SPEC,
@@ -414,6 +454,7 @@ JOB_REGISTRY = {
     ASSISTANT_LEARNING_SPEC.job_name: ASSISTANT_LEARNING_SPEC,
     WEEKLY_PERSONAL_REVIEW_SPEC.job_name: WEEKLY_PERSONAL_REVIEW_SPEC,
     MEETING_PREP_BRIEFING_SPEC.job_name: MEETING_PREP_BRIEFING_SPEC,
+    MEETING_OUTCOME_CAPTURE_SPEC.job_name: MEETING_OUTCOME_CAPTURE_SPEC,
 }
 
 
@@ -581,6 +622,15 @@ def launchagent_execution_mode(program_arguments: list[str]) -> str:
     ):
         return "localhost_ssh_bridge"
     if (
+        program_arguments[:1] == ["/usr/bin/ssh"]
+        and "localhost" in program_arguments
+        and "meeting_outcome_scheduler.py --live" in joined
+        and "--notify-failures" in joined
+        and "--apply-safe-followups" in joined
+        and "--json" in joined
+    ):
+        return "localhost_ssh_bridge"
+    if (
         program_arguments
         and program_arguments[0].endswith("/python")
         and any(arg.endswith("weekly_personal_review_scheduler.py") for arg in program_arguments)
@@ -595,6 +645,16 @@ def launchagent_execution_mode(program_arguments: list[str]) -> str:
         and any(arg.endswith("meeting_prep_scheduler.py") for arg in program_arguments)
         and "--live" in program_arguments
         and "--notify" in program_arguments
+        and "--json" in program_arguments
+    ):
+        return "direct_launchd_python"
+    if (
+        program_arguments
+        and program_arguments[0].endswith("/python")
+        and any(arg.endswith("meeting_outcome_scheduler.py") for arg in program_arguments)
+        and "--live" in program_arguments
+        and "--notify-failures" in program_arguments
+        and "--apply-safe-followups" in program_arguments
         and "--json" in program_arguments
     ):
         return "direct_launchd_python"
@@ -757,6 +817,10 @@ def _helper_state(spec: SchedulerJobSpec) -> dict[str, Any]:
         "outcome_count",
         "active_bounded_count",
         "proposal_count",
+        "processed_count",
+        "tasks_created",
+        "tasks_updated",
+        "memory_promoted_count",
     ]
     safe_state = {key: state.get(key) for key in safe_keys if key in state}
     return {"status": "ok", "state_path": str(path), "state": safe_state}
@@ -933,7 +997,7 @@ def evaluate_scheduler_job(
                     "summary": f"{spec.job_label} LaunchAgent uses the localhost SSH bridge, but localhost SSH is unavailable.",
                 }
             )
-    if spec.job_name in {"training_calendar_booking", "email_triage_booking", "task_spine", "coding_work_briefing", "task_command_capture", "daily_personal_briefing", "assistant_learning", "weekly_personal_review"}:
+    if spec.job_name in {"training_calendar_booking", "email_triage_booking", "task_spine", "coding_work_briefing", "task_command_capture", "daily_personal_briefing", "assistant_learning", "weekly_personal_review", "meeting_outcome_capture"}:
         if execution_mode == "localhost_ssh_bridge":
             pass
         elif execution_mode == "custom":
@@ -1038,7 +1102,7 @@ def evaluate_scheduler_job(
                 "summary": proxy_state.get("summary") or "Helper state is degraded.",
             }
         )
-    if spec.job_name in {"training_calendar_booking", "email_triage_booking", "task_spine", "coding_work_briefing", "task_command_capture", "daily_personal_briefing", "assistant_learning", "weekly_personal_review"}:
+    if spec.job_name in {"training_calendar_booking", "email_triage_booking", "task_spine", "coding_work_briefing", "task_command_capture", "daily_personal_briefing", "assistant_learning", "weekly_personal_review", "meeting_outcome_capture"}:
         helper_payload = proxy_state.get("state") or {}
         if helper_payload.get("error_hash"):
             issues.append(
