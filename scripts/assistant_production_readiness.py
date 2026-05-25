@@ -47,6 +47,7 @@ CRITICAL_JOB_NAMES = {
     "weekly_personal_review",
     "meeting_prep_briefing",
     "meeting_outcome_capture",
+    "assistant_incident_manager",
 }
 ACCEPTABLE_LEARNING_STATUSES = {"ready_verified", "calibration_pending"}
 PENDING_GATE_STATUS = "ready_pending_natural_run"
@@ -197,9 +198,9 @@ def _classify_scheduler_health(payload: dict[str, Any], not_ready: list[dict[str
         if name not in CRITICAL_JOB_NAMES:
             continue
         status = str(job.get("status") or "unknown")
-        if status == "blocked":
+        if status in {"blocked", "blocked_infrastructure"}:
             not_ready.append({"source": "scheduler_health", "job_name": name, "status": status, "reason": job.get("failure_class") or "scheduler_blocked"})
-        elif status in {"degraded", "unknown"}:
+        elif status in {"degraded", "unknown", "manual_review_required", "healthy_with_user_action_required"}:
             manual.append({"source": "scheduler_health", "job_name": name, "status": status, "reason": job.get("failure_class") or "scheduler_degraded"})
 
 
@@ -254,7 +255,12 @@ def _read_open_dead_letters(path: Path) -> list[dict[str, Any]]:
         return []
     try:
         state = AssistantSchedulerState(path)
-        return state.list_dead_letters(status="open", limit=100)
+        rows = state.list_dead_letters(status=None, limit=200)
+        return [
+            row
+            for row in rows
+            if str(row.get("status") or "open") in {"open", "notified", "waiting_for_user", "ack_failed"}
+        ][:100]
     except (OSError, sqlite3.Error):
         return []
 
@@ -305,7 +311,7 @@ def _safe_health(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _safe_dead_letter(item: dict[str, Any]) -> dict[str, Any]:
-    return {key: item.get(key) for key in ["dead_letter_id", "job_name", "failure_class", "safe_summary", "recovery_hint", "attempts", "last_failed_at", "error_hash"]}
+    return {key: item.get(key) for key in ["dead_letter_id", "job_name", "workflow", "failure_class", "status", "safe_summary", "recovery_hint", "attempts", "last_failed_at", "error_hash"]}
 
 
 def _safe_recovery_summary(hygiene: dict[str, Any], dead_letters: list[dict[str, Any]]) -> dict[str, Any]:

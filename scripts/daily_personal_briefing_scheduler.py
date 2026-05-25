@@ -18,7 +18,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from assistant_audit_log import AssistantAuditLog
-from assistant_notification_dispatcher import DEFAULT_ALERT_CHANNEL_ID, DEFAULT_OPENCLAW_CONFIG_PATH
+from assistant_notification_dispatcher import DEFAULT_ALERT_CHANNEL_ID, DEFAULT_OPENCLAW_CONFIG_PATH, dispatch_user_notification
 from assistant_run_lock import acquire_run_lock, release_run_lock
 from assistant_scheduler_state import AssistantSchedulerState, utc_now_iso
 from coding_focus_live_booking import book_coding_focus_proposal
@@ -173,10 +173,14 @@ def run_daily_personal_briefing_scheduler(
                 scheduler_db_path=scheduler_db_path,
                 ledger_path=ledger_path,
             )
-        notification = _send_discord_briefing(
+        notification = _send_routed_briefing(
             briefing.get("discord_message") or ((briefing.get("rendered") or {}).get("discord_message")),
             channel_id=notification_channel_id or DEFAULT_ALERT_CHANNEL_ID,
             dry_run=notification_dry_run,
+            target_date=planning_day.isoformat(),
+            idempotency_key=run_key,
+            ledger_path=ledger_path,
+            scheduler_db_path=scheduler_db_path,
             post_func=post_func,
         ) if notify else {"status": "skipped", "reason": "notify_disabled"}
         notification_failed = notification.get("status") == "failed"
@@ -239,17 +243,21 @@ def _safe_booking_mode(*, planning_day: date, now: datetime, live: bool, apply_s
     return "live"
 
 
-def _send_discord_briefing(message: str | None, *, channel_id: str, dry_run: bool, post_func: Any | None = None) -> dict[str, Any]:
+def _send_routed_briefing(message: str | None, *, channel_id: str, dry_run: bool, target_date: str, idempotency_key: str, ledger_path: str | Path | None, scheduler_db_path: str | Path | None, post_func: Any | None = None) -> dict[str, Any]:
     safe_message = _safe_multiline_text(message or "Rocky daily brief is empty.", 1850)
-    if dry_run:
-        return {"status": "dry_run", "reason": "notification_dry_run", "channel_id": channel_id, "message_preview": safe_message[:500], "message_sha256": _hash_text(safe_message), "notification_attempted": False}
-    try:
-        token = _load_discord_token(DEFAULT_OPENCLAW_CONFIG_PATH)
-        poster = post_func or _post_to_discord
-        delivery = poster(token=token, channel_id=channel_id, content=safe_message)
-    except Exception as exc:
-        return {"status": "failed", "reason": exc.__class__.__name__, "error_hash": _hash_text(str(exc)), "notification_attempted": True}
-    return {"status": delivery.get("status") or "posted", "channel_id": channel_id, "message_sha256": _hash_text(safe_message), "notification_attempted": True, "delivery": _safe_result(delivery)}
+    return dispatch_user_notification(
+        workflow="daily_personal_briefing",
+        message=safe_message,
+        subject=f"Rocky daily brief - {target_date}",
+        reason="daily_personal_briefing_delivery",
+        target_date=target_date,
+        idempotency_key=idempotency_key,
+        channel_id=channel_id,
+        ledger_path=ledger_path,
+        scheduler_db_path=scheduler_db_path,
+        dry_run=dry_run,
+        post_func=post_func,
+    )
 
 
 def _post_to_discord(*, token: str, channel_id: str, content: str) -> dict[str, Any]:

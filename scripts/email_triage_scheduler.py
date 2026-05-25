@@ -314,16 +314,6 @@ def _finish_run(
     state = AssistantSchedulerState(scheduler_db_path)
     status = str(safe.get("status") or "unknown")
     reason = str(safe.get("reason") or status)
-    state.record_job_run(
-        job_name=JOB_NAME,
-        job_label="Rocky email triage booking",
-        scheduled_for=str(safe.get("target_date") or ""),
-        status=_job_run_status(status, dead_letter=dead_letter),
-        idempotency_key=str(safe.get("run_idempotency_key") or safe.get("idempotency_key") or ""),
-        failure_class=failure_class,
-        summary=reason,
-        error_hash=safe.get("error_hash"),
-    )
     if dead_letter:
         dead = state.upsert_dead_letter(
             job_name=JOB_NAME,
@@ -354,8 +344,6 @@ def _finish_run(
             },
         )
         safe.setdefault("audit_id", event.audit_id)
-    if state_file:
-        _write_state_file(Path(state_file), safe)
     if notify_failures:
         safe["notification"] = dispatch_failure_notification(
             safe,
@@ -364,6 +352,19 @@ def _finish_run(
             scheduler_db_path=scheduler_db_path,
             dry_run=notification_dry_run,
         )
+    if state_file:
+        _write_state_file(Path(state_file), safe)
+    handled_business_block = _handled_business_block(safe, failure_class=failure_class)
+    state.record_job_run(
+        job_name=JOB_NAME,
+        job_label="Rocky email triage booking",
+        scheduled_for=str(safe.get("target_date") or ""),
+        status=_job_run_status(status, dead_letter=dead_letter, handled_business_block=handled_business_block),
+        idempotency_key=str(safe.get("run_idempotency_key") or safe.get("idempotency_key") or ""),
+        failure_class=None if handled_business_block else failure_class,
+        summary=reason,
+        error_hash=safe.get("error_hash"),
+    )
     return safe
 
 
@@ -438,7 +439,16 @@ def _safe_booking_summary(payload: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def _job_run_status(status: str, *, dead_letter: bool) -> str:
+def _handled_business_block(payload: dict[str, Any], *, failure_class: str | None) -> bool:
+    if failure_class != "no_available_slot":
+        return False
+    notification = payload.get("notification") or {}
+    return notification.get("status") in {"posted", "dry_run"}
+
+
+def _job_run_status(status: str, *, dead_letter: bool, handled_business_block: bool = False) -> str:
+    if handled_business_block:
+        return "succeeded"
     if dead_letter:
         return "dead_lettered"
     if status.startswith("skipped") or status in {"created", "dry_run_proposal"}:
@@ -458,6 +468,7 @@ def _write_state_file(path: Path, payload: dict[str, Any]) -> None:
         "created_count": payload.get("created_count", 0),
         "skipped_count": payload.get("skipped_count", 0),
         "blocked_count": payload.get("blocked_count", 0),
+        "notification_status": (payload.get("notification") or {}).get("status"),
         "error_hash": payload.get("error_hash"),
     }
     tmp = path.with_suffix(".tmp")
@@ -536,7 +547,12 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         print(f"Email triage scheduler: {payload.get('status')} ({payload.get('reason')})")
-    return 0 if payload.get("status") in {"created", "skipped_duplicate", "skipped_no_attention_emails", "skipped_weekend_target", "skipped_before_morning", "dry_run_proposal"} else 1
+    handled_business_block = (
+        payload.get("status") == "blocked"
+        and payload.get("reason") == "no_available_slot"
+        and (payload.get("notification") or {}).get("status") in {"posted", "dry_run"}
+    )
+    return 0 if payload.get("status") in {"created", "skipped_duplicate", "skipped_no_attention_emails", "skipped_weekend_target", "skipped_before_morning", "dry_run_proposal"} or handled_business_block else 1
 
 
 if __name__ == "__main__":

@@ -70,7 +70,13 @@ def evaluate_daily_personal_briefing_readiness(
         read_launchctl=read_launchctl,
     )
     recent = recent_payload or _read_recent_daily_runs(scheduler_db_path, limit=10)
-    open_dead_letters = dead_letters if dead_letters is not None else _read_open_daily_dead_letters(scheduler_db_path, limit=20)
+    relevant_dead_letters = dead_letters if dead_letters is not None else _read_daily_dead_letters(scheduler_db_path, limit=20)
+    open_dead_letters = [item for item in relevant_dead_letters if str(item.get("status") or "open") in {"open", "notified", "waiting_for_user", "ack_failed"}]
+    notification_compensated = any(
+        str(item.get("failure_class") or "") == "daily_personal_briefing_notification_failed"
+        and str(item.get("status") or "") == "recovered"
+        for item in relevant_dead_letters
+    )
     audit = audit_events if audit_events is not None else _read_recent_daily_audit(audit_log_path, limit=10)
 
     signals = health.get("signals") or {}
@@ -136,6 +142,7 @@ def evaluate_daily_personal_briefing_readiness(
         latest_run=latest_run,
         notification_status=notification_status,
         open_dead_letters=open_dead_letters,
+        notification_compensated=notification_compensated,
         calendar_summary=calendar_summary,
     )
 
@@ -170,6 +177,7 @@ def _decide_readiness(
     latest_run: dict[str, Any] | None,
     notification_status: str,
     open_dead_letters: list[dict[str, Any]],
+    notification_compensated: bool,
     calendar_summary: dict[str, Any],
 ) -> tuple[str, str, list[str]]:
     launchctl = launchagent.get("launchctl") or {}
@@ -196,6 +204,8 @@ def _decide_readiness(
     if calendar_summary.get("evidence_incomplete"):
         return MANUAL_REVIEW, "daily_briefing_calendar_side_effect_evidence_incomplete", ["Inspect scheduler state and audit rows; created_count is nonzero but booking_results are missing."]
     if notification_status == "failed":
+        if notification_compensated:
+            return READY_VERIFIED, "daily_briefing_notification_compensated_by_agentmail_fallback", []
         if open_dead_letters:
             return MANUAL_REVIEW, "daily_briefing_notification_failed_with_dead_letter", ["Inspect assistant-dead-letters --json; briefing work completed but Discord delivery needs attention."]
         return NOT_READY, "daily_briefing_notification_failed_without_dead_letter", ["Discord delivery failed without a safe dead letter; inspect scheduler output and notification dispatcher logs."]
@@ -267,7 +277,7 @@ def _read_recent_daily_runs(db_path: str | Path | None, *, limit: int) -> dict[s
     return {"status": "ok", "count": len(runs), "runs": runs, "calendar_write_attempted": False, "notion_write_attempted": False}
 
 
-def _read_open_daily_dead_letters(db_path: str | Path | None, *, limit: int) -> list[dict[str, Any]]:
+def _read_daily_dead_letters(db_path: str | Path | None, *, limit: int) -> list[dict[str, Any]]:
     path = Path(db_path) if db_path else DEFAULT_SCHEDULER_DB_PATH
     if not path.exists():
         return []
@@ -277,7 +287,7 @@ def _read_open_daily_dead_letters(db_path: str | Path | None, *, limit: int) -> 
             rows = conn.execute(
                 """
                 SELECT * FROM assistant_dead_letters
-                WHERE job_name = ? AND status = 'open'
+                WHERE job_name = ?
                 ORDER BY updated_at DESC LIMIT ?
                 """,
                 (DAILY_JOB_NAME, max(1, int(limit))),

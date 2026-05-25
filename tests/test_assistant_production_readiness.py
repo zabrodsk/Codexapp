@@ -23,6 +23,7 @@ def _scheduler(status="healthy", *, blocked_job=None):
         "weekly_personal_review",
         "meeting_prep_briefing",
         "meeting_outcome_capture",
+        "assistant_incident_manager",
     ]:
         job_status = "blocked" if name == blocked_job else "healthy"
         jobs.append({"job_name": name, "status": job_status, "failure_class": "launchagent_not_loaded" if job_status == "blocked" else None})
@@ -131,6 +132,32 @@ def test_open_dead_letters_and_orphan_blocks_need_manual_review():
     assert payload["status"] == "manual_review_required"
     assert any(item["source"] == "assistant_dead_letters" for item in payload["manual_review_items"])
     assert any(item["source"] == "calendar_hygiene" for item in payload["manual_review_items"])
+
+
+def test_communicated_business_block_is_manual_review_not_not_ready():
+    scheduler = _scheduler()
+    for job in scheduler["jobs"]:
+        if job["job_name"] == "email_triage_booking":
+            job["status"] = "healthy_with_user_action_required"
+            job["failure_class"] = "email_triage_no_available_slot"
+
+    payload = build_assistant_production_readiness(
+        scheduler_health_payload=scheduler,
+        daily_readiness_payload=_ready(),
+        weekly_readiness_payload=_ready(),
+        learning_readiness_payload=_ready("calibration_pending"),
+        meeting_prep_readiness_payload=_ready(),
+        meeting_outcome_readiness_payload=_ready(),
+        calendar_write_health_payload={"status": "ok", "calendar_write_attempted": False},
+        calendar_hygiene_payload={"status": "ok", "issue_count": 0, "calendar_write_attempted": False, "notion_write_attempted": False},
+        dead_letters=[{"dead_letter_id": "dead:1", "job_name": "email_triage_booking", "failure_class": "no_available_slot", "status": "waiting_for_user"}],
+        agentmail_health_payload={"status": "ok"},
+        notion_health_payload={"status": "ok"},
+    )
+
+    assert payload["status"] == "manual_review_required"
+    assert payload["not_ready_items"] == []
+    assert any(item["job_name"] == "email_triage_booking" for item in payload["manual_review_items"])
 
 
 def test_blocked_scheduler_or_calendar_health_is_not_ready():

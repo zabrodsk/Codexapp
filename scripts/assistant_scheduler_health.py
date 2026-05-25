@@ -175,6 +175,21 @@ MEETING_OUTCOME_CAPTURE_DIRECT_PROGRAM_ARGUMENTS = [
     "--apply-safe-followups",
     "--json",
 ]
+INCIDENT_MANAGER_SSH_BRIDGE_PROGRAM_ARGUMENTS = [
+    "/usr/bin/ssh",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "StrictHostKeyChecking=accept-new",
+    "localhost",
+    "cd /Users/clawdbot/.openclaw/workspace && /Users/clawdbot/.openclaw/workspace/.venv/bin/python scripts/assistant_incident_manager.py --live --json",
+]
+INCIDENT_MANAGER_DIRECT_PROGRAM_ARGUMENTS = [
+    "/Users/clawdbot/.openclaw/workspace/.venv/bin/python",
+    "/Users/clawdbot/.openclaw/workspace/scripts/assistant_incident_manager.py",
+    "--live",
+    "--json",
+]
 
 
 @dataclass(frozen=True)
@@ -443,6 +458,29 @@ MEETING_OUTCOME_CAPTURE_SPEC = SchedulerJobSpec(
     missing_log_grace_minutes=60,
 )
 
+ASSISTANT_INCIDENT_MANAGER_SPEC = SchedulerJobSpec(
+    job_name="assistant_incident_manager",
+    job_label="Rocky incident manager",
+    workflow="assistant_incident_manager",
+    launchagent=LaunchAgentSpec(
+        label="com.openclaw.rocky-incident-manager",
+        plist_path="/Users/clawdbot/Library/LaunchAgents/com.openclaw.rocky-incident-manager.plist",
+        program_arguments=INCIDENT_MANAGER_SSH_BRIDGE_PROGRAM_ARGUMENTS,
+        working_directory="/Users/clawdbot/.openclaw/workspace",
+        stdout_path="/Users/clawdbot/.openclaw/logs/rocky-incident-manager.log",
+        stderr_path="/Users/clawdbot/.openclaw/logs/rocky-incident-manager.err.log",
+        weekdays=[0, 1, 2, 3, 4, 5, 6],
+        hour=0,
+        minute=0,
+        timezone="Europe/Prague",
+        first_expected_run_after="2026-05-25T00:00:00+02:00",
+        start_interval_seconds=900,
+    ),
+    state_path="/Users/clawdbot/.openclaw/state/assistant_incident_manager.json",
+    first_expected_run_after="2026-05-25T00:00:00+02:00",
+    missing_log_grace_minutes=20,
+)
+
 JOB_REGISTRY = {
     BETTY_MAIL_TRIAGE_SPEC.job_name: BETTY_MAIL_TRIAGE_SPEC,
     TRAINING_CALENDAR_BOOKING_SPEC.job_name: TRAINING_CALENDAR_BOOKING_SPEC,
@@ -455,6 +493,7 @@ JOB_REGISTRY = {
     WEEKLY_PERSONAL_REVIEW_SPEC.job_name: WEEKLY_PERSONAL_REVIEW_SPEC,
     MEETING_PREP_BRIEFING_SPEC.job_name: MEETING_PREP_BRIEFING_SPEC,
     MEETING_OUTCOME_CAPTURE_SPEC.job_name: MEETING_OUTCOME_CAPTURE_SPEC,
+    ASSISTANT_INCIDENT_MANAGER_SPEC.job_name: ASSISTANT_INCIDENT_MANAGER_SPEC,
 }
 
 
@@ -631,6 +670,13 @@ def launchagent_execution_mode(program_arguments: list[str]) -> str:
     ):
         return "localhost_ssh_bridge"
     if (
+        program_arguments[:1] == ["/usr/bin/ssh"]
+        and "localhost" in program_arguments
+        and "assistant_incident_manager.py --live" in joined
+        and "--json" in joined
+    ):
+        return "localhost_ssh_bridge"
+    if (
         program_arguments
         and program_arguments[0].endswith("/python")
         and any(arg.endswith("weekly_personal_review_scheduler.py") for arg in program_arguments)
@@ -655,6 +701,14 @@ def launchagent_execution_mode(program_arguments: list[str]) -> str:
         and "--live" in program_arguments
         and "--notify-failures" in program_arguments
         and "--apply-safe-followups" in program_arguments
+        and "--json" in program_arguments
+    ):
+        return "direct_launchd_python"
+    if (
+        program_arguments
+        and program_arguments[0].endswith("/python")
+        and any(arg.endswith("assistant_incident_manager.py") for arg in program_arguments)
+        and "--live" in program_arguments
         and "--json" in program_arguments
     ):
         return "direct_launchd_python"
@@ -827,10 +881,51 @@ def _helper_state(spec: SchedulerJobSpec) -> dict[str, Any]:
 
 
 def _max_status(statuses: list[str]) -> str:
-    order = {"healthy": 0, "degraded": 1, "unknown": 1, "blocked": 2}
+    order = {
+        "healthy": 0,
+        "healthy_with_user_action_required": 1,
+        "manual_review_required": 1,
+        "degraded": 1,
+        "unknown": 1,
+        "blocked_infrastructure": 2,
+        "blocked": 2,
+    }
     if not statuses:
         return "healthy"
     return max(statuses, key=lambda item: order.get(item, 1))
+
+
+def _reinterpret_business_issues(
+    spec: SchedulerJobSpec,
+    issues: list[dict[str, Any]],
+    helper_state: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Keep expected business blocks out of infrastructure-failure buckets."""
+    helper_payload = helper_state.get("state") or {}
+    if spec.job_name != "email_triage_booking":
+        return issues
+    if str(helper_payload.get("last_status") or "") != "blocked":
+        return issues
+    if str(helper_payload.get("reason") or "") != "no_available_slot":
+        return issues
+
+    communicated = str(helper_payload.get("notification_status") or "") in {"posted", "dry_run", "fallback_used"}
+    status = "healthy_with_user_action_required" if communicated else "manual_review_required"
+    replacement = {
+        "status": status,
+        "failure_class": "email_triage_no_available_slot",
+        "summary": (
+            "Email triage had no same-day slot; Rocky must ask Dusan whether to split, book the next allowed working day, or skip."
+        ),
+    }
+    kept = [
+        issue
+        for issue in issues
+        if issue.get("failure_class") not in {"launchagent_nonzero_exit", "email_triage_booking_error_hash_present"}
+    ]
+    if not any(issue.get("failure_class") == replacement["failure_class"] for issue in kept):
+        kept.append(replacement)
+    return kept
 
 
 def _daily_personal_natural_run_status(
@@ -997,7 +1092,7 @@ def evaluate_scheduler_job(
                     "summary": f"{spec.job_label} LaunchAgent uses the localhost SSH bridge, but localhost SSH is unavailable.",
                 }
             )
-    if spec.job_name in {"training_calendar_booking", "email_triage_booking", "task_spine", "coding_work_briefing", "task_command_capture", "daily_personal_briefing", "assistant_learning", "weekly_personal_review", "meeting_outcome_capture"}:
+    if spec.job_name in {"training_calendar_booking", "email_triage_booking", "task_spine", "coding_work_briefing", "task_command_capture", "daily_personal_briefing", "assistant_learning", "weekly_personal_review", "meeting_outcome_capture", "assistant_incident_manager"}:
         if execution_mode == "localhost_ssh_bridge":
             pass
         elif execution_mode == "custom":
@@ -1102,7 +1197,7 @@ def evaluate_scheduler_job(
                 "summary": proxy_state.get("summary") or "Helper state is degraded.",
             }
         )
-    if spec.job_name in {"training_calendar_booking", "email_triage_booking", "task_spine", "coding_work_briefing", "task_command_capture", "daily_personal_briefing", "assistant_learning", "weekly_personal_review", "meeting_outcome_capture"}:
+    if spec.job_name in {"training_calendar_booking", "email_triage_booking", "task_spine", "coding_work_briefing", "task_command_capture", "daily_personal_briefing", "assistant_learning", "weekly_personal_review", "meeting_outcome_capture", "assistant_incident_manager"}:
         helper_payload = proxy_state.get("state") or {}
         if helper_payload.get("error_hash"):
             issues.append(
@@ -1130,9 +1225,10 @@ def evaluate_scheduler_job(
                     }
                 )
 
+    issues = _reinterpret_business_issues(spec, issues, proxy_state)
     overall_status = _max_status([issue["status"] for issue in issues])
     failure_class = next(
-        (issue.get("failure_class") for issue in issues if issue["status"] == "blocked"),
+        (issue.get("failure_class") for issue in issues if issue["status"] in {"blocked", "blocked_infrastructure"}),
         None,
     ) or next((issue.get("failure_class") for issue in issues), None)
     if not issues:
@@ -1168,8 +1264,11 @@ def evaluate_scheduler_job(
         state = AssistantSchedulerState(state_db_path)
         run_status = {
             "healthy": "succeeded",
+            "healthy_with_user_action_required": "succeeded",
+            "manual_review_required": "stale",
             "degraded": "stale",
             "blocked": "dead_lettered",
+            "blocked_infrastructure": "dead_lettered",
             "unknown": "unknown",
         }.get(overall_status, "unknown")
         state.record_job_run(
@@ -1185,7 +1284,7 @@ def evaluate_scheduler_job(
             summary=summary,
             error_hash=logs.get("stderr_hash"),
         )
-        if overall_status == "blocked":
+        if overall_status in {"blocked", "blocked_infrastructure"}:
             dead_letter = state.upsert_dead_letter(
                 job_name=spec.job_name,
                 workflow=spec.workflow,
@@ -1202,14 +1301,20 @@ def evaluate_scheduler_job(
         audit_log = AssistantAuditLog(audit_log_path)
         event_type = {
             "healthy": "scheduler.health_ok",
+            "healthy_with_user_action_required": "scheduler.health_degraded",
+            "manual_review_required": "scheduler.health_degraded",
             "degraded": "scheduler.health_degraded",
             "blocked": "scheduler.health_blocked",
+            "blocked_infrastructure": "scheduler.health_blocked",
             "unknown": "scheduler.health_degraded",
         }.get(overall_status, "scheduler.health_degraded")
         decision = {
             "healthy": "allowed",
+            "healthy_with_user_action_required": "degraded",
+            "manual_review_required": "degraded",
             "degraded": "degraded",
             "blocked": "blocked",
+            "blocked_infrastructure": "blocked",
             "unknown": "degraded",
         }.get(overall_status, "degraded")
         event = audit_log.record_event(
@@ -1265,7 +1370,15 @@ def evaluate_all_scheduler_jobs(
 
 def format_scheduler_health_report(payload: dict[str, Any]) -> str:
     lines = ["Assistant Scheduler Health", "=" * 28]
-    status_icons = {"healthy": "[OK]", "degraded": "[WARN]", "blocked": "[FAIL]", "unknown": "[????]"}
+    status_icons = {
+        "healthy": "[OK]",
+        "healthy_with_user_action_required": "[ACTION]",
+        "manual_review_required": "[REVIEW]",
+        "degraded": "[WARN]",
+        "blocked": "[FAIL]",
+        "blocked_infrastructure": "[FAIL]",
+        "unknown": "[????]",
+    }
     for job in payload.get("jobs") or []:
         icon = status_icons.get(job.get("status"), "[????]")
         lines.append(f"{icon} {job.get('job_name')}: {job.get('summary')}")

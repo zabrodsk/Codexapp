@@ -18,7 +18,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from assistant_audit_log import AssistantAuditLog
-from assistant_notification_dispatcher import DEFAULT_ALERT_CHANNEL_ID, DEFAULT_OPENCLAW_CONFIG_PATH
+from assistant_notification_dispatcher import DEFAULT_ALERT_CHANNEL_ID, DEFAULT_OPENCLAW_CONFIG_PATH, dispatch_user_notification
 from assistant_run_lock import acquire_run_lock, release_run_lock
 from assistant_scheduler_state import AssistantSchedulerState, utc_now_iso
 from weekly_personal_signal_collector import collect_weekly_personal_signals
@@ -58,7 +58,7 @@ def run_weekly_personal_review_scheduler(*, planning_date: str | date | None = N
             payload = {"status": "skipped_not_weekly_review_day", "reason": "weekly_review_runs_on_monday", "workflow": WORKFLOW, "target_week": week_label, "target_date": planning_day.isoformat(), "run_idempotency_key": run_key, "lock": lock.to_dict(), "notification": {"status": "skipped", "reason": "not_monday"}, "calendar_write_attempted": False, "notion_write_attempted": False}
             return _finish(payload, scheduler_db_path=scheduler_db_path, ledger_path=ledger_path, state_file=state_file, write_audit=write_audit)
         review = build_weekly_personal_review(planning_date=planning_day, db_path=db_path, scheduler_db_path=scheduler_db_path, signals_payload=signals_payload, plan_payload=plan_payload)
-        notification = _send_discord(review.get("discord_message") or ((review.get("rendered") or {}).get("discord_message")), channel_id=notification_channel_id or DEFAULT_ALERT_CHANNEL_ID, dry_run=notification_dry_run, post_func=post_func) if notify else {"status": "skipped", "reason": "notify_disabled"}
+        notification = _send_routed_review(review.get("discord_message") or ((review.get("rendered") or {}).get("discord_message")), channel_id=notification_channel_id or DEFAULT_ALERT_CHANNEL_ID, dry_run=notification_dry_run, target_date=planning_day.isoformat(), idempotency_key=run_key, ledger_path=ledger_path, scheduler_db_path=scheduler_db_path, post_func=post_func) if notify else {"status": "skipped", "reason": "notify_disabled"}
         failed_notification = notification.get("status") == "failed"
         payload = {"status": "degraded" if failed_notification else "ok" if review.get("status") in {"ok", "degraded"} else str(review.get("status") or "failed"), "reason": "weekly_personal_review_notification_failed" if failed_notification else "weekly_personal_review_completed" if review.get("status") == "ok" else str(review.get("reason") or "weekly_personal_review_degraded"), "workflow": WORKFLOW, "target_week": week_label, "target_date": planning_day.isoformat(), "run_idempotency_key": run_key, "review": _safe_review(review), "plan": review.get("plan") or {}, "notification": notification, "calendar_write_attempted": False, "notion_write_attempted": False, "created_count": 0, "skipped_count": 0, "lock": lock.to_dict()}
         return _finish(payload, scheduler_db_path=scheduler_db_path, ledger_path=ledger_path, state_file=state_file, write_audit=write_audit, dead_letter=failed_notification)
@@ -83,16 +83,21 @@ def list_weekly_personal_review_runs(*, limit: int = 20, scheduler_db_path: str 
     return {"status": "ok", "count": len(runs), "runs": runs, "calendar_write_attempted": False, "notion_write_attempted": False}
 
 
-def _send_discord(message: str | None, *, channel_id: str, dry_run: bool, post_func: Any | None = None) -> dict[str, Any]:
+def _send_routed_review(message: str | None, *, channel_id: str, dry_run: bool, target_date: str, idempotency_key: str, ledger_path: str | Path | None, scheduler_db_path: str | Path | None, post_func: Any | None = None) -> dict[str, Any]:
     safe_message = _safe_multiline(message or "Rocky weekly review is empty.", 1900)
-    if dry_run:
-        return {"status": "dry_run", "reason": "notification_dry_run", "channel_id": channel_id, "message_preview": safe_message[:700], "message_sha256": _hash_text(safe_message), "notification_attempted": False}
-    try:
-        token = _load_discord_token(DEFAULT_OPENCLAW_CONFIG_PATH)
-        delivery = (post_func or _post_to_discord)(token=token, channel_id=channel_id, content=safe_message)
-    except Exception as exc:
-        return {"status": "failed", "reason": exc.__class__.__name__, "error_hash": _hash_text(str(exc)), "notification_attempted": True}
-    return {"status": delivery.get("status") or "posted", "channel_id": channel_id, "message_sha256": _hash_text(safe_message), "notification_attempted": True, "delivery": _safe_result(delivery)}
+    return dispatch_user_notification(
+        workflow="weekly_personal_review",
+        message=safe_message,
+        subject=f"Rocky weekly review - {target_date}",
+        reason="weekly_personal_review_delivery",
+        target_date=target_date,
+        idempotency_key=idempotency_key,
+        channel_id=channel_id,
+        ledger_path=ledger_path,
+        scheduler_db_path=scheduler_db_path,
+        dry_run=dry_run,
+        post_func=post_func,
+    )
 
 
 def _post_to_discord(*, token: str, channel_id: str, content: str) -> dict[str, Any]:

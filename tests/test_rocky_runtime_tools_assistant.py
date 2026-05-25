@@ -229,6 +229,11 @@ def test_parser_includes_assistant_commands():
     assert parser.parse_args(["assistant-production-readiness", "--expected-date", "2026-05-25", "--expected-week", "2026-W22"]).command == "assistant-production-readiness"
     assert parser.parse_args(["assistant-safe-recovery"]).command == "assistant-safe-recovery"
     assert parser.parse_args(["assistant-safe-recovery", "--action", "mark-calendar-stale", "--idempotency-key", "rocky:test", "--live"]).command == "assistant-safe-recovery"
+    assert parser.parse_args(["assistant-notification-health"]).command == "assistant-notification-health"
+    assert parser.parse_args(["assistant-incident-manager-run", "--live"]).command == "assistant-incident-manager-run"
+    assert parser.parse_args(["assistant-incident-recent"]).command == "assistant-incident-recent"
+    assert parser.parse_args(["assistant-incident-retry", "--dead-letter-id", "dead:1", "--live"]).command == "assistant-incident-retry"
+    assert parser.parse_args(["assistant-incident-respond", "--dead-letter-id", "dead:1", "--action", "acknowledge", "--live"]).command == "assistant-incident-respond"
     assert parser.parse_args(["task-command-apply", "--text", "remember this"]).command == "task-command-apply"
     assert parser.parse_args(["task-command-capture-run"]).command == "task-command-capture-run"
     assert parser.parse_args(["task-command-recent"]).command == "task-command-recent"
@@ -942,6 +947,7 @@ def test_runtime_deployable_files_include_training_calendar_modules():
     assert "scripts/training_calendar_scheduler.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/training_calendar_reconciler.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/assistant_notification_dispatcher.py" in RUNTIME_DEPLOYABLE_FILES
+    assert "scripts/assistant_incident_manager.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/assistant_calendar_tcc_probe.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/email_triage_proposal_engine.py" in RUNTIME_DEPLOYABLE_FILES
     assert "scripts/email_triage_live_booking.py" in RUNTIME_DEPLOYABLE_FILES
@@ -981,6 +987,9 @@ def test_runtime_deployable_files_include_training_calendar_modules():
     assert "skills/preference-models/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
     assert "skills/production-readiness/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
     assert "skills/safe-recovery/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
+    assert "skills/assistant-notification-router/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
+    assert "skills/assistant-incident-manager/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
+    assert "improvement/assistant_incident_runbook.md" in RUNTIME_DEPLOYABLE_FILES
     assert "skills/coding-session-inspector/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
     assert "skills/coding-memory-enricher/SKILL.md" in RUNTIME_DEPLOYABLE_FILES
     assert "skills/coding-work-briefing/SKILL.md" in RUNTIME_DEPLOYABLE_FILES

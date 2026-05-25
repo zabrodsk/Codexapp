@@ -101,7 +101,8 @@ from assistant_learning_readiness import evaluate_assistant_learning_readiness
 from assistant_production_readiness import build_assistant_production_readiness
 from assistant_safe_recovery import run_safe_recovery_action
 from assistant_codex_llm import task_llm_health
-from assistant_notification_dispatcher import dispatch_failure_notification
+from assistant_incident_manager import list_incidents, respond_to_incident, retry_incident, run_incident_manager
+from assistant_notification_dispatcher import build_notification_health, dispatch_failure_notification
 from assistant_run_lock import smoke_lock_cycle
 from assistant_scheduler_health import evaluate_all_scheduler_jobs, format_scheduler_health_report
 from assistant_scheduler_state import AssistantSchedulerState
@@ -181,6 +182,7 @@ RUNTIME_DEPLOYABLE_FILES = (
     "scripts/assistant_codex_llm.py",
     "scripts/assistant_launchd.py",
     "scripts/assistant_notification_dispatcher.py",
+    "scripts/assistant_incident_manager.py",
     "scripts/assistant_run_lock.py",
     "scripts/assistant_scheduler_health.py",
     "scripts/assistant_scheduler_health_launcher.py",
@@ -282,6 +284,9 @@ RUNTIME_DEPLOYABLE_FILES = (
     "skills/meeting-follow-up-automation/SKILL.md",
     "skills/production-readiness/SKILL.md",
     "skills/safe-recovery/SKILL.md",
+    "skills/assistant-notification-router/SKILL.md",
+    "skills/assistant-incident-manager/SKILL.md",
+    "improvement/assistant_incident_runbook.md",
     "scripts/training_calendar_live_booking.py",
     "scripts/training_calendar_proposal_engine.py",
     "scripts/training_calendar_reconciler.py",
@@ -1554,11 +1559,68 @@ def build_parser() -> argparse.ArgumentParser:
     notification_dispatch.add_argument("--target-date", dest="target_date")
     notification_dispatch.add_argument("--idempotency-key", dest="idempotency_key")
     notification_dispatch.add_argument("--channel-id", default="1485710572325703901", dest="channel_id")
+    notification_dispatch.add_argument("--fallback-email", default="dusan.zabrodsky@rockaway.cz", dest="fallback_email")
+    notification_dispatch.add_argument("--no-agentmail-fallback", action="store_false", dest="allow_agentmail_fallback", default=True)
     notification_dispatch.add_argument("--config-path", default="/Users/clawdbot/.openclaw/openclaw.json", dest="config_path")
+    notification_dispatch.add_argument("--agentmail-config-path", default="/Users/clawdbot/.openclaw/agentmail-bridge/config.json", dest="agentmail_config_path")
+    notification_dispatch.add_argument("--agentmail-credentials-path", default="/Users/clawdbot/.openclaw/credentials/agentmail.json", dest="agentmail_credentials_path")
     notification_dispatch.add_argument("--ledger-path", dest="ledger_path")
     notification_dispatch.add_argument("--scheduler-db", dest="scheduler_db")
     notification_dispatch.add_argument("--dry-run", action="store_true", dest="dry_run")
     notification_dispatch.add_argument("--json", action="store_true", dest="json_output")
+
+    notification_health = sub.add_parser(
+        "assistant-notification-health",
+        help="Check Discord primary and AgentMail fallback notification readiness.",
+    )
+    notification_health.add_argument("--channel-id", default="1485710572325703901", dest="channel_id")
+    notification_health.add_argument("--config-path", default="/Users/clawdbot/.openclaw/openclaw.json", dest="config_path")
+    notification_health.add_argument("--agentmail-config-path", default="/Users/clawdbot/.openclaw/agentmail-bridge/config.json", dest="agentmail_config_path")
+    notification_health.add_argument("--agentmail-credentials-path", default="/Users/clawdbot/.openclaw/credentials/agentmail.json", dest="agentmail_credentials_path")
+    notification_health.add_argument("--ledger-path", dest="ledger_path")
+    notification_health.add_argument("--no-write-audit", action="store_false", dest="write_audit", default=True)
+    notification_health.add_argument("--json", action="store_true", dest="json_output")
+
+    incident_manager = sub.add_parser(
+        "assistant-incident-manager-run",
+        help="Process open assistant dead letters into notified/recovered/waiting incidents.",
+    )
+    incident_manager.add_argument("--state-db", dest="state_db")
+    incident_manager.add_argument("--ledger-path", dest="ledger_path")
+    incident_manager.add_argument("--state-file", default="/Users/clawdbot/.openclaw/state/assistant_incident_manager.json", dest="state_file")
+    incident_manager.add_argument("--quiet-window-minutes", type=int, default=120, dest="quiet_window_minutes")
+    incident_manager.add_argument("--limit", type=int, default=20)
+    incident_manager.add_argument("--live", action="store_true")
+    incident_manager.add_argument("--json", action="store_true", dest="json_output")
+
+    incident_recent = sub.add_parser(
+        "assistant-incident-recent",
+        help="Show recent assistant incidents/dead letters with their communication status.",
+    )
+    incident_recent.add_argument("--limit", type=int, default=20)
+    incident_recent.add_argument("--state-db", dest="state_db")
+    incident_recent.add_argument("--json", action="store_true", dest="json_output")
+
+    incident_retry = sub.add_parser(
+        "assistant-incident-retry",
+        help="Retry a recoverable assistant incident by dead-letter id.",
+    )
+    incident_retry.add_argument("--dead-letter-id", required=True, dest="dead_letter_id")
+    incident_retry.add_argument("--state-db", dest="state_db")
+    incident_retry.add_argument("--ledger-path", dest="ledger_path")
+    incident_retry.add_argument("--live", action="store_true")
+    incident_retry.add_argument("--json", action="store_true", dest="json_output")
+
+    incident_respond = sub.add_parser(
+        "assistant-incident-respond",
+        help="Record Dusan/operator response for an assistant incident.",
+    )
+    incident_respond.add_argument("--dead-letter-id", required=True, dest="dead_letter_id")
+    incident_respond.add_argument("--action", required=True, choices=["acknowledge", "ignore", "recover"])
+    incident_respond.add_argument("--state-db", dest="state_db")
+    incident_respond.add_argument("--ledger-path", dest="ledger_path")
+    incident_respond.add_argument("--live", action="store_true")
+    incident_respond.add_argument("--json", action="store_true", dest="json_output")
 
     agentmail_health = sub.add_parser(
         "agentmail-bridge-health",
@@ -1627,7 +1689,7 @@ def build_parser() -> argparse.ArgumentParser:
     dead_letters.add_argument(
         "--status",
         default="open",
-        choices=["open", "acknowledged", "recovered", "ignored", "all"],
+        choices=["open", "notified", "waiting_for_user", "ack_failed", "acknowledged", "recovered", "ignored", "all"],
         help="Dead-letter status filter.",
     )
     dead_letters.add_argument("--state-db", dest="state_db", help="Optional assistant scheduler SQLite path.")
@@ -2995,7 +3057,6 @@ def cmd_calendar_block_create(args) -> int:
         source_refs=args.source_ref,
         calendar_name=args.calendar_name,
         live=args.live,
-        state_db_path=args.state_db,
         ledger_path=args.ledger_path,
         scheduler_db_path=args.scheduler_db,
         db_path=args.db_path,
@@ -3645,6 +3706,10 @@ def cmd_assistant_notification_dispatch(args) -> int:
         },
         channel_id=args.channel_id,
         config_path=args.config_path,
+        fallback_email=getattr(args, "fallback_email", "dusan.zabrodsky@rockaway.cz"),
+        agentmail_config_path=getattr(args, "agentmail_config_path", "/Users/clawdbot/.openclaw/agentmail-bridge/config.json"),
+        agentmail_credentials_path=getattr(args, "agentmail_credentials_path", "/Users/clawdbot/.openclaw/credentials/agentmail.json"),
+        allow_agentmail_fallback=getattr(args, "allow_agentmail_fallback", True),
         ledger_path=args.ledger_path,
         scheduler_db_path=args.scheduler_db,
         dry_run=args.dry_run,
@@ -3655,6 +3720,80 @@ def cmd_assistant_notification_dispatch(args) -> int:
         print(f"Assistant notification: {payload.get('status')}")
         print(f"Reason: {payload.get('reason')}")
     return 0 if payload.get("status") in {"posted", "dry_run", "skipped"} else 1
+
+
+def cmd_assistant_notification_health(args) -> int:
+    payload = build_notification_health(
+        channel_id=args.channel_id,
+        config_path=args.config_path,
+        agentmail_config_path=args.agentmail_config_path,
+        agentmail_credentials_path=args.agentmail_credentials_path,
+        ledger_path=args.ledger_path,
+        write_audit=args.write_audit,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Assistant notification health: {payload.get('status')}")
+        for check in payload.get("checks") or []:
+            print(f"- {check.get('name')}: {check.get('status')} ({check.get('reason')})")
+    return 0 if payload.get("status") in {"ok", "degraded"} else 1
+
+
+def cmd_assistant_incident_manager_run(args) -> int:
+    payload = run_incident_manager(
+        live=args.live,
+        scheduler_db_path=args.state_db,
+        ledger_path=args.ledger_path,
+        state_file=args.state_file,
+        quiet_minutes=args.quiet_window_minutes,
+        limit=args.limit,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Assistant incident manager: {payload.get('status')} processed={payload.get('processed_count', 0)}")
+    return 0 if payload.get("status") in {"ok", "dry_run", "manual_review_required", "skipped_duplicate_run", "degraded"} else 1
+
+
+def cmd_assistant_incident_recent(args) -> int:
+    payload = list_incidents(limit=args.limit, scheduler_db_path=args.state_db)
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Assistant incidents: {payload.get('count', 0)}")
+        for item in payload.get("incidents") or []:
+            print(f"- {item.get('dead_letter_id')}: {item.get('status')} {item.get('job_name')} {item.get('failure_class')}")
+    return 0
+
+
+def cmd_assistant_incident_retry(args) -> int:
+    payload = retry_incident(
+        dead_letter_id=args.dead_letter_id,
+        live=args.live,
+        scheduler_db_path=args.state_db,
+        ledger_path=args.ledger_path,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Assistant incident retry: {payload.get('status')} {payload.get('dead_letter_id')}")
+    return 0 if payload.get("status") in {"recovered", "waiting_for_user", "notified", "dry_run"} else 1
+
+
+def cmd_assistant_incident_respond(args) -> int:
+    payload = respond_to_incident(
+        dead_letter_id=args.dead_letter_id,
+        action=args.action,
+        live=args.live,
+        scheduler_db_path=args.state_db,
+        ledger_path=args.ledger_path,
+    )
+    if args.json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Assistant incident response: {payload.get('status')} {payload.get('dead_letter_id')}")
+    return 0 if payload.get("status") in {"acknowledged", "ignored", "recovered", "dry_run"} else 1
 
 
 def cmd_notion_task_health(args) -> int:
@@ -4610,6 +4749,11 @@ def main() -> int:
         "assistant-learning-readiness": cmd_assistant_learning_readiness,
         "assistant-learning-calibration-review": cmd_assistant_learning_calibration_review,
         "assistant-notification-dispatch": cmd_assistant_notification_dispatch,
+        "assistant-notification-health": cmd_assistant_notification_health,
+        "assistant-incident-manager-run": cmd_assistant_incident_manager_run,
+        "assistant-incident-recent": cmd_assistant_incident_recent,
+        "assistant-incident-retry": cmd_assistant_incident_retry,
+        "assistant-incident-respond": cmd_assistant_incident_respond,
         "agentmail-bridge-health": cmd_agentmail_bridge_health,
         "assistant-production-readiness": cmd_assistant_production_readiness,
         "assistant-safe-recovery": cmd_assistant_safe_recovery,

@@ -90,6 +90,62 @@ def test_notification_failure_creates_dead_letter(tmp_path):
     assert "super-secret-token" not in json.dumps(dead)
 
 
+def test_discord_403_falls_back_to_agentmail(tmp_path):
+    config = tmp_path / "openclaw.json"
+    config.write_text(json.dumps({"channels": {"discord": {"token": "super-secret-token"}}}))
+    emails = []
+
+    def poster(*, token, channel_id, content):
+        return {"status": "failed", "reason": "discord_http_403", "status_code": 403}
+
+    def emailer(*, to_email, subject, text, config_path, credentials_path):
+        emails.append({"to": to_email, "subject": subject, "text": text})
+        return {"status": "posted", "message_id": "email-1", "to": to_email}
+
+    payload = dispatch_failure_notification(
+        {"status": "blocked", "reason": "manual_review_required"},
+        config_path=config,
+        ledger_path=tmp_path / "assistant_audit.jsonl",
+        scheduler_db_path=tmp_path / "assistant_scheduler.sqlite3",
+        post_func=poster,
+        agentmail_send_func=emailer,
+    )
+
+    assert payload["status"] == "posted"
+    assert payload["final_status"] == "posted"
+    assert payload["fallback_used"] is True
+    assert payload["primary_failure_reason"] == "discord_permission_denied"
+    assert emails and emails[0]["to"] == "dusan.zabrodsky@rockaway.cz"
+    assert AssistantSchedulerState(tmp_path / "assistant_scheduler.sqlite3").list_dead_letters() == []
+
+
+def test_both_notification_channels_failing_creates_one_dead_letter(tmp_path):
+    config = tmp_path / "openclaw.json"
+    config.write_text(json.dumps({"channels": {"discord": {"token": "super-secret-token"}}}))
+
+    def poster(*, token, channel_id, content):
+        return {"status": "failed", "reason": "discord_http_403", "status_code": 403}
+
+    def emailer(*, to_email, subject, text, config_path, credentials_path):
+        return {"status": "failed", "reason": "agentmail_outbound_failed"}
+
+    payload = dispatch_failure_notification(
+        {"status": "blocked", "reason": "manual_review_required"},
+        config_path=config,
+        ledger_path=tmp_path / "assistant_audit.jsonl",
+        scheduler_db_path=tmp_path / "assistant_scheduler.sqlite3",
+        post_func=poster,
+        agentmail_send_func=emailer,
+    )
+
+    assert payload["status"] == "failed"
+    assert payload["fallback_used"] is True
+    assert payload["primary_failure_reason"] == "discord_permission_denied"
+    dead = AssistantSchedulerState(tmp_path / "assistant_scheduler.sqlite3").list_dead_letters()
+    assert len(dead) == 1
+    assert dead[0]["failure_class"] == "assistant_notification_failed"
+
+
 def test_notification_title_uses_workflow_not_training_specific_text():
     message = render_notification(
         {"workflow": "email_triage_scheduler", "status": "blocked", "reason": "calendar_write_health_not_ok"}

@@ -36,15 +36,17 @@ def evaluate_weekly_personal_review_readiness(*, expected_week: str | None = Non
     grace_until = expected_run + timedelta(minutes=spec.missing_log_grace_minutes)
     health = health_payload or evaluate_scheduler_job(spec, now=now, state_db_path=scheduler_db_path, audit_log_path=audit_log_path, write_state=False, write_audit=False, launchctl_text=launchctl_text, read_launchctl=read_launchctl)
     runs = recent_runs if recent_runs is not None else _read_recent_weekly_runs(scheduler_db_path, limit=10)
-    open_dead = dead_letters if dead_letters is not None else _read_open_weekly_dead_letters(scheduler_db_path, limit=20)
+    relevant_dead = dead_letters if dead_letters is not None else _read_weekly_dead_letters(scheduler_db_path, limit=20)
+    open_dead = [item for item in relevant_dead if str(item.get("status") or "open") in {"open", "notified", "waiting_for_user", "ack_failed"}]
+    notification_compensated = any(str(item.get("failure_class") or "") == "weekly_personal_review_notification_failed" and str(item.get("status") or "") == "recovered" for item in relevant_dead)
     signals = health.get("signals") or {}; launchagent = signals.get("launchagent") or {}; launchctl = launchagent.get("launchctl") or {}; logs = signals.get("logs") or {}; helper_state = (signals.get("helper_state") or {}).get("state") or {}
     latest = _latest_run_for_week(runs, week_label)
     evidence = {"expected_run": expected_run.isoformat(), "grace_until": grace_until.isoformat(), "checked_at": now.isoformat(), "launchagent": {"label": launchagent.get("label") or spec.launchagent.label, "status": launchagent.get("status"), "loaded": launchctl.get("loaded"), "runs": launchctl.get("runs"), "last_exit_code": launchctl.get("last_exit_code"), "state": launchctl.get("state")}, "logs": {"stdout_path": logs.get("stdout_path"), "stderr_path": logs.get("stderr_path"), "stderr_size": logs.get("stderr_size"), "stderr_hash": logs.get("stderr_hash"), "status": logs.get("status")}, "scheduler_state": {"last_run_at": helper_state.get("last_run_at"), "last_status": helper_state.get("last_status"), "target_week": helper_state.get("target_week"), "target_date": helper_state.get("target_date"), "notification_status": helper_state.get("notification_status"), "calendar_write_attempted": helper_state.get("calendar_write_attempted"), "notion_write_attempted": helper_state.get("notion_write_attempted"), "error_hash": helper_state.get("error_hash")}, "recent_run": latest, "dead_letters": {"open_count": len(open_dead), "items": [_safe_dead_letter(item) for item in open_dead[:5]]}, "health_status": health.get("status"), "health_failure_class": health.get("failure_class")}
-    status, reason, hints = _decide(now=now, grace_until=grace_until, week_label=week_label, health=health, launchagent=launchagent, logs=logs, helper_state=helper_state, latest_run=latest, open_dead_letters=open_dead)
+    status, reason, hints = _decide(now=now, grace_until=grace_until, week_label=week_label, health=health, launchagent=launchagent, logs=logs, helper_state=helper_state, latest_run=latest, open_dead_letters=open_dead, notification_compensated=notification_compensated)
     return redact_payload({"status": status, "reason": reason, "summary": _summary(status, week_label, reason), "expected_week": week_label, "expected_run": expected_run.isoformat(), "grace_until": grace_until.isoformat(), "production_ready": status == READY_VERIFIED, "recovery_hints": hints, "evidence": evidence, "calendar_write_attempted": False, "notion_write_attempted": False, "notification_sent": False})
 
 
-def _decide(*, now: datetime, grace_until: datetime, week_label: str, health: dict[str, Any], launchagent: dict[str, Any], logs: dict[str, Any], helper_state: dict[str, Any], latest_run: dict[str, Any] | None, open_dead_letters: list[dict[str, Any]]) -> tuple[str, str, list[str]]:
+def _decide(*, now: datetime, grace_until: datetime, week_label: str, health: dict[str, Any], launchagent: dict[str, Any], logs: dict[str, Any], helper_state: dict[str, Any], latest_run: dict[str, Any] | None, open_dead_letters: list[dict[str, Any]], notification_compensated: bool) -> tuple[str, str, list[str]]:
     launchctl = launchagent.get("launchctl") or {}
     if launchagent.get("status") == "blocked" or not launchctl.get("loaded", True):
         return NOT_READY, "weekly_review_launchagent_not_loaded", ["Inspect and reload com.openclaw.rocky-weekly-personal-review before waiting for the next run."]
@@ -67,6 +69,8 @@ def _decide(*, now: datetime, grace_until: datetime, week_label: str, health: di
     if open_dead_letters:
         return MANUAL_REVIEW, "weekly_review_open_dead_letters", ["Inspect assistant-dead-letters --json for weekly_personal_review before accepting readiness."]
     if helper_state.get("notification_status") == "failed":
+        if notification_compensated:
+            return READY_VERIFIED, "weekly_review_notification_compensated_by_agentmail_fallback", []
         return MANUAL_REVIEW, "weekly_review_notification_failed", ["Weekly review ran but Discord delivery failed; inspect dead letters and notification logs."]
     if helper_state.get("notification_status") != "posted":
         return NOT_READY, "weekly_review_notification_not_posted", ["The natural production run must post Discord, not dry-run or skip, before readiness is verified."]
@@ -88,14 +92,14 @@ def _read_recent_weekly_runs(db_path: str | Path | None, *, limit: int) -> list[
     return [dict(row) for row in rows]
 
 
-def _read_open_weekly_dead_letters(db_path: str | Path | None, *, limit: int) -> list[dict[str, Any]]:
+def _read_weekly_dead_letters(db_path: str | Path | None, *, limit: int) -> list[dict[str, Any]]:
     path = Path(db_path) if db_path else DEFAULT_SCHEDULER_DB_PATH
     if not path.exists():
         return []
     try:
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5) as conn:
             conn.row_factory = sqlite3.Row
-            rows = conn.execute("SELECT * FROM assistant_dead_letters WHERE job_name = ? AND status = 'open' ORDER BY updated_at DESC LIMIT ?", (JOB_NAME, max(1, int(limit)))).fetchall()
+            rows = conn.execute("SELECT * FROM assistant_dead_letters WHERE job_name = ? ORDER BY updated_at DESC LIMIT ?", (JOB_NAME, max(1, int(limit)))).fetchall()
     except sqlite3.Error:
         return []
     return [dict(row) for row in rows]

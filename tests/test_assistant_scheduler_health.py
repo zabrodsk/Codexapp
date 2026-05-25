@@ -39,6 +39,8 @@ from assistant_scheduler_health import (
     MEETING_OUTCOME_CAPTURE_SPEC,
     MEETING_OUTCOME_CAPTURE_SSH_BRIDGE_PROGRAM_ARGUMENTS,
     MEETING_OUTCOME_CAPTURE_DIRECT_PROGRAM_ARGUMENTS,
+    ASSISTANT_INCIDENT_MANAGER_SPEC,
+    INCIDENT_MANAGER_SSH_BRIDGE_PROGRAM_ARGUMENTS,
     TRAINING_CALENDAR_DIRECT_PROGRAM_ARGUMENTS,
     TRAINING_CALENDAR_BOOKING_SPEC,
     TRAINING_CALENDAR_SSH_BRIDGE_PROGRAM_ARGUMENTS,
@@ -210,6 +212,71 @@ def test_pending_first_run_is_healthy_and_writes_audit(tmp_path):
     assert payload["calendar_write_attempted"] is False
     rows = [json.loads(line) for line in (tmp_path / "assistant_audit.jsonl").read_text().splitlines()]
     assert rows[-1]["event_type"] == "scheduler.health_ok"
+
+
+def test_incident_manager_launchagent_mode_is_recognized():
+    assert launchagent_execution_mode(INCIDENT_MANAGER_SSH_BRIDGE_PROGRAM_ARGUMENTS) == "localhost_ssh_bridge"
+    assert "assistant_incident_manager" in JOB_REGISTRY
+    assert JOB_REGISTRY["assistant_incident_manager"].launchagent.label == ASSISTANT_INCIDENT_MANAGER_SPEC.launchagent.label
+
+
+def test_email_no_slot_is_user_action_required_not_infrastructure_block(tmp_path):
+    spec = EMAIL_TRIAGE_BOOKING_SPEC
+    state_path = tmp_path / "email_state.json"
+    stdout = tmp_path / "email.log"
+    stderr = tmp_path / "email.err.log"
+    plist = tmp_path / "com.openclaw.rocky-email-triage-booking.plist"
+    launchagent = LaunchAgentSpec(
+        label=spec.launchagent.label,
+        plist_path=str(plist),
+        program_arguments=EMAIL_TRIAGE_SSH_BRIDGE_PROGRAM_ARGUMENTS,
+        working_directory=spec.launchagent.working_directory,
+        stdout_path=str(stdout),
+        stderr_path=str(stderr),
+        weekdays=spec.launchagent.weekdays,
+        hour=spec.launchagent.hour,
+        minute=spec.launchagent.minute,
+        timezone=spec.launchagent.timezone,
+        first_expected_run_after=spec.first_expected_run_after,
+    )
+    plist.write_bytes(
+        plistlib.dumps(
+            {
+                "Label": launchagent.label,
+                "ProgramArguments": launchagent.program_arguments,
+                "WorkingDirectory": launchagent.working_directory,
+                "StandardOutPath": launchagent.stdout_path,
+                "StandardErrorPath": launchagent.stderr_path,
+                "StartCalendarInterval": [
+                    {"Weekday": day, "Hour": launchagent.hour, "Minute": launchagent.minute}
+                    for day in launchagent.weekdays
+                ],
+            }
+        )
+    )
+    stdout.write_text("{}\n")
+    stderr.write_text("")
+    state_path.write_text(json.dumps({"last_status": "blocked", "reason": "no_available_slot", "notification_status": "posted"}))
+    local_spec = SchedulerJobSpec(
+        job_name=spec.job_name,
+        job_label=spec.job_label,
+        workflow=spec.workflow,
+        launchagent=launchagent,
+        state_path=str(state_path),
+        first_expected_run_after=spec.first_expected_run_after,
+    )
+
+    payload = evaluate_scheduler_job(
+        local_spec,
+        now=datetime(2026, 5, 25, 12, 0, tzinfo=ZoneInfo("Europe/Prague")),
+        state_db_path=tmp_path / "assistant_scheduler.sqlite3",
+        audit_log_path=tmp_path / "assistant_audit.jsonl",
+        launchctl_text="state = not running\nruns = 1\nlast exit code = 1\n",
+    )
+
+    assert payload["status"] == "healthy_with_user_action_required"
+    assert payload["failure_class"] == "email_triage_no_available_slot"
+    assert "no same-day slot" in payload["summary"]
 
 
 def test_enabled_old_cron_blocks_and_creates_dead_letter(tmp_path):
