@@ -71,3 +71,31 @@ def test_mark_stale_requires_live_and_only_mutates_state(tmp_path):
     assert live["state_mutated"] is True
     assert live["calendar_write_attempted"] is False
     assert state.get("rocky:task_focus:2026-05-26:missing")["status"] == "stale"
+
+
+def test_idempotency_metadata_match_without_rocky_title_is_not_stale(tmp_path):
+    state_db = tmp_path / "calendar.sqlite3"
+    key = "rocky:task_focus:2026-05-26:manual"
+    AssistantCalendarState(state_db).record_created(
+        idempotency_key=key,
+        calendar_name="Calendar",
+        title="Manifesto data-room review",
+        start="2026-05-26T11:00:00+02:00",
+        end="2026-05-26T11:45:00+02:00",
+        event_uid="uid-manual",
+        create_audit_id="manual-eventkit",
+        metadata={"write_path": "manual_eventkit_after_osascript_create_failed"},
+    )
+    events = [
+        _event(
+            "Manifesto data-room review",
+            "2026-05-26 11:00:00",
+            "2026-05-26 11:45:00",
+            f"Booked by: Rocky\nIdempotency key: {key}",
+        )
+    ]
+
+    payload = inspect_weekly_calendar_hygiene(start_date="2026-05-25", days=3, events=events, state_db_path=state_db)
+
+    assert payload["stale_state_candidates"] == []
+    assert payload["orphan_rocky_events"] == []

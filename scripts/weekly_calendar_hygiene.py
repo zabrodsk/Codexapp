@@ -77,7 +77,7 @@ def inspect_weekly_calendar_hygiene(
             errors.append({"source": "calendar_state", "reason": "calendar_state_read_failed", "error_hash": _hash_text(str(exc))})
 
     sanitized_events = [_safe_event(event) for event in events or []]
-    rocky_events = [event for event in sanitized_events if str(event.get("summary") or "").startswith(ROCKY_PREFIX)]
+    rocky_events = [event for event in sanitized_events if _is_rocky_owned_event(event)]
     active_state = [row for row in state_blocks or [] if str(row.get("status") or "") == "active"]
     state_by_key = {str(row.get("idempotency_key")): row for row in state_blocks or [] if row.get("idempotency_key")}
     active_by_key = {str(row.get("idempotency_key")): row for row in active_state if row.get("idempotency_key")}
@@ -159,6 +159,14 @@ def _stale_state_candidates(records: list[dict[str, Any]], events: list[dict[str
         if key and key not in event_keys:
             result.append(_safe_state_row(row))
     return result
+
+
+def _is_rocky_owned_event(event: dict[str, Any]) -> bool:
+    return (
+        str(event.get("summary") or "").startswith(ROCKY_PREFIX)
+        or bool(event.get("idempotency_key"))
+        or bool(event.get("has_rocky_metadata"))
+    )
 
 
 def _day_hygiene(events: list[dict[str, Any]], *, start_day: date, days: int) -> list[dict[str, Any]]:
