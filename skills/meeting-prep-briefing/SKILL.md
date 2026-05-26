@@ -22,9 +22,9 @@ Inputs:
 
 Outputs:
 - Concise meeting focus.
-- Relevant context.
-- Open loops and decisions.
-- Questions to ask.
+- Relevant context in human-readable prose, not raw retrieval snippets, diffs, or metadata hunks.
+- Only open loops and decisions that match the meeting closely enough; do not include broad task matches just because a weak term such as RockawayQ appears.
+- Questions to ask, including an explicit request for Dusan's steer when Rocky is uncertain about the meeting goal.
 - Source references and confidence.
 
 Side effects:

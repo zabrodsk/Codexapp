@@ -16,6 +16,19 @@ SENSITIVE_RE = re.compile(
     re.IGNORECASE,
 )
 
+NOISE_TERMS = {
+    "call",
+    "join",
+    "meeting",
+    "microsoft",
+    "teams",
+    "teams.microsoft.com",
+    "zoom",
+    "url",
+}
+GENERIC_DOMAINS = {"gmail.com", "rockaway.cz", "rockawaycapital.com"}
+INTERNAL_PERSON_TERMS = {"dušan", "dusan", "zábrodský", "zabrodsky", "michal", "šmída", "smida"}
+
 
 def collect_meeting_context_clues(
     meeting: dict[str, Any],
@@ -64,18 +77,33 @@ def collect_meeting_context_clues(
 def _terms(meeting: dict[str, Any]) -> list[str]:
     terms: list[str] = []
     terms.extend(str(item or "") for item in meeting.get("query_terms") or [])
-    terms.extend(str(item or "") for item in meeting.get("participant_domains") or [])
+    terms.extend(str(item or "") for item in meeting.get("participant_domains") or [] if item not in GENERIC_DOMAINS)
+    for participant in meeting.get("participants") or []:
+        if isinstance(participant, dict) and not participant.get("is_self") and str(participant.get("domain") or "").lower() not in GENERIC_DOMAINS:
+            terms.extend(re.findall(r"[A-Za-zÁ-ž0-9][A-Za-zÁ-ž0-9._-]{2,}", str(participant.get("name") or "")))
     terms.extend(str(item or "") for item in meeting.get("description_clues") or [])
     terms.extend(re.findall(r"[A-Za-zÁ-ž0-9][A-Za-zÁ-ž0-9._-]{2,}", str(meeting.get("title") or "")))
     seen: set[str] = set()
     unique: list[str] = []
     for term in terms:
         clean = _safe_text(term, 80).lower()
-        if len(clean) < 3 or clean in seen or clean in {"meeting", "call", "zoom"}:
+        if not _is_useful_term(clean) or clean in seen:
             continue
         unique.append(clean)
         seen.add(clean)
     return unique
+
+
+def _is_useful_term(term: str) -> bool:
+    if len(term) < 3 or term in NOISE_TERMS or term in INTERNAL_PERSON_TERMS:
+        return False
+    if len(term) >= 6 and re.search(r"\d", term):
+        return False
+    if re.fullmatch(r"[0-9a-f-]{8,}", term):
+        return False
+    if "safelinks" in term or "teams.microsoft" in term:
+        return False
+    return True
 
 
 def _safe_text(value: Any, limit: int = 500) -> str:

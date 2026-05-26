@@ -61,33 +61,44 @@ def render_meeting_prep_message(meeting: dict[str, Any], brief: dict[str, Any], 
     start = _safe_text(meeting.get("start_local"), 32)
     title = _safe_text(meeting.get("title"), 120)
     lines = [
-        f"Rocky meeting prep - {start}",
-        title,
+        f"Rocky meeting prep: {title}",
+        f"When: {start}",
         "",
-        "Focus",
+        "Best read",
         f"- {brief.get('focus') or 'Use the context below to enter the meeting prepared.'}",
         "",
-        "Relevant context",
+        "Why this looks relevant",
     ]
-    for item in (brief.get("context_points") or [])[:4]:
-        lines.append(f"- {item}")
+    context_points = (brief.get("context_points") or [])[:4]
+    if context_points:
+        for item in context_points:
+            lines.append(f"- {item}")
+    else:
+        lines.append("- I did not find enough reliable context to summarize without guessing.")
     if brief.get("open_loops"):
-        lines.extend(["", "Open loops"])
+        lines.extend(["", "Open loops to protect"])
         for item in (brief.get("open_loops") or [])[:4]:
             lines.append(f"- {item}")
+    else:
+        lines.extend(["", "Open loops to protect", "- No reliable open task matched this meeting closely enough."])
+    if brief.get("clarification"):
+        lines.extend(["", "I may need your steer"])
+        for item in (brief.get("clarification") or [])[:3]:
+            lines.append(f"- {item}")
     if brief.get("questions"):
-        lines.extend(["", "Questions to ask"])
+        lines.extend(["", "Useful questions"])
         for item in (brief.get("questions") or [])[:4]:
             lines.append(f"- {item}")
     if brief.get("dusan_notes"):
-        lines.extend(["", "Dusan note"])
+        lines.extend(["", "Your latest note"])
         for item in (brief.get("dusan_notes") or [])[:3]:
             lines.append(f"- {item}")
-    refs = [str(ref) for ref in (enriched_context.get("source_refs") or [])[:6]]
+    refs = [str(ref) for ref in (enriched_context.get("source_refs") or [])[:5]]
     if refs:
-        lines.extend(["", "Refs"])
-        lines.append(", ".join(refs))
-    return _safe_multiline("\n".join(lines), 1800)
+        lines.extend(["", "Safe refs"])
+        for ref in refs:
+            lines.append(f"- {ref}")
+    return _safe_multiline("\n".join(lines), 1900)
 
 
 def _deterministic_brief(meeting: dict[str, Any], enriched: dict[str, Any]) -> dict[str, Any]:
@@ -97,18 +108,22 @@ def _deterministic_brief(meeting: dict[str, Any], enriched: dict[str, Any]) -> d
     notes = enriched.get("discord_context_notes") or []
     context_points: list[str] = []
     for item in memory_items[:3]:
-        title = item.get("title") or "Obsidian context"
-        summary = item.get("summary") or item.get("source_ref") or ""
-        context_points.append(_safe_text(f"{title}: {summary}", 220))
+        point = _memory_point(item)
+        if point:
+            context_points.append(point)
     for item in email_items[:2]:
-        context_points.append(_safe_text(f"Recent email signal from {item.get('sender_domain') or 'mail'}: {item.get('subject_preview')}", 180))
+        point = _email_point(item)
+        if point:
+            context_points.append(point)
     open_loops = [
-        _safe_text(f"{item.get('priority') or 'Normal'} task: {item.get('title')}", 180)
+        _safe_text(f"{item.get('priority') or 'Normal'}: {item.get('title')}", 180)
         for item in task_items[:4]
     ]
     dusan_notes = [_safe_text(note.get("preview") or note.get("note_preview"), 220) for note in notes[:3]]
-    focus = _focus_line(meeting, memory_items, task_items, notes)
+    clarification_needed = bool((enriched.get("relevance") or {}).get("clarification_needed")) or float(enriched.get("confidence") or 0) < 0.7
+    focus = _focus_line(meeting, memory_items, task_items, notes, clarification_needed)
     questions = _questions(meeting, task_items, memory_items)
+    clarification = _clarification_lines(meeting, enriched, context_points, task_items) if clarification_needed else []
     if not context_points and dusan_notes:
         context_points.append("Dusan sent fresh context for this meeting.")
     if not context_points and open_loops:
@@ -117,15 +132,39 @@ def _deterministic_brief(meeting: dict[str, Any], enriched: dict[str, Any]) -> d
         "focus": focus,
         "context_points": [item for item in context_points if item],
         "open_loops": [item for item in open_loops if item],
+        "clarification": clarification,
         "questions": questions,
         "dusan_notes": [item for item in dusan_notes if item],
         "done_signal": "Meeting completed with decisions and next actions captured.",
     }
 
 
-def _focus_line(meeting: dict[str, Any], memory_items: list[dict[str, Any]], task_items: list[dict[str, Any]], notes: list[dict[str, Any]]) -> str:
+def _memory_point(item: dict[str, Any]) -> str:
+    title = _safe_text(item.get("title") or "Obsidian context", 90)
+    summary = _clean_context_summary(item.get("summary"))
+    if summary and _looks_human_readable(summary):
+        return _safe_text(f"{title}: {summary}", 240)
+    return _safe_text(f"{title}: relevant memory note found, but the excerpt is metadata-heavy; use the ref below as evidence.", 220)
+
+
+def _email_point(item: dict[str, Any]) -> str:
+    subject = _safe_text(item.get("subject_preview"), 140)
+    if not subject:
+        return ""
+    return _safe_text(f"Recent email clue: {subject}", 180)
+
+
+def _focus_line(
+    meeting: dict[str, Any],
+    memory_items: list[dict[str, Any]],
+    task_items: list[dict[str, Any]],
+    notes: list[dict[str, Any]],
+    clarification_needed: bool,
+) -> str:
     if notes:
         return "Use Dusan's fresh Discord note as the top intent signal, then ground it in memory and open tasks."
+    if clarification_needed:
+        return f"I found partial context for {_safe_text(meeting.get('title'), 80)}, but Rocky should confirm the exact meeting goal before making strong assumptions."
     if task_items:
         return "Resolve or advance the related open loops without creating new unclear commitments."
     if memory_items:
@@ -144,6 +183,19 @@ def _questions(meeting: dict[str, Any], task_items: list[dict[str, Any]], memory
     return questions[:4]
 
 
+def _clarification_lines(meeting: dict[str, Any], enriched: dict[str, Any], context_points: list[str], task_items: list[dict[str, Any]]) -> list[str]:
+    title = _safe_text(meeting.get("title"), 90)
+    lines = [
+        f"I found partial context for {title}, but not enough to know whether the meeting is about FLO, RockawayQ, or both.",
+        "If this is wrong, reply in Discord with: for this meeting: <goal / decision / people to focus on>.",
+    ]
+    if not task_items:
+        lines.append("I found no close open task, so I am not assuming a follow-up agenda.")
+    if not context_points:
+        lines.append("The available context was too weak to quote as fact.")
+    return lines
+
+
 def _llm_refine(brief: dict[str, Any], *, llm_func: Any) -> dict[str, Any]:
     try:
         raw = llm_func(json.dumps(brief, ensure_ascii=False, sort_keys=True))
@@ -157,6 +209,30 @@ def _safe_text(value: Any, limit: int = 500) -> str:
     text = re.sub(r"\s+", " ", str(value or "")).strip()
     text = SENSITIVE_RE.sub("[redacted]", text)
     return text[:limit]
+
+
+def _clean_context_summary(value: Any) -> str:
+    text = _safe_text(value, 500)
+    text = re.sub(r"@@[^@]*@@", " ", text)
+    text = re.sub(r"\(\d+ before,\s*\d+ after\)", " ", text)
+    text = re.sub(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]", r"\1", text)
+    text = re.sub(r"[*_`#>-]+", " ", text)
+    text = re.sub(r"\b(?:dedupe_key|source_agents|last_updated|sources|type):\s*[^-]+", " ", text, flags=re.IGNORECASE)
+    for marker in ("Active acquisition pipeline", "Definable KPIs"):
+        idx = text.find(marker)
+        if idx > 0:
+            text = text[idx:]
+            break
+    return re.sub(r"\s+", " ", text).strip(" -")
+
+
+def _looks_human_readable(text: str) -> bool:
+    lowered = text.lower()
+    noisy_fragments = ("@@", "dedupe_key", " from:", " date:", ".ics", "accepted:", "příloha pošty")
+    if not text or any(fragment in lowered for fragment in noisy_fragments):
+        return False
+    words = re.findall(r"[A-Za-zÁ-ž]{3,}", text)
+    return len(words) >= 5
 
 
 def _safe_multiline(value: Any, limit: int = 1800) -> str:
