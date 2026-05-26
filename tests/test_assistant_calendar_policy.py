@@ -58,8 +58,8 @@ def test_coding_focus_requires_at_least_one_hour_and_ends_by_1930():
     assert "coding_focus_must_end_by_19_30" in too_late.reasons
 
 
-def test_email_triage_requires_minimum_duration_and_post_noon_start():
-    too_short = evaluate_calendar_policy(
+def test_email_triage_allows_short_chunks_and_still_requires_post_noon_start():
+    short_chunk = evaluate_calendar_policy(
         kind="email_triage",
         day="2026-05-25",
         start="13:00",
@@ -72,8 +72,8 @@ def test_email_triage_requires_minimum_duration_and_post_noon_start():
         duration_minutes=30,
     )
 
-    assert too_short.allowed is False
-    assert "email_triage_minimum_duration_is_30_minutes" in too_short.reasons
+    assert short_chunk.allowed is True
+    assert "policy_allowed" in short_chunk.reasons
     assert too_early.allowed is False
     assert "email_triage_must_start_no_earlier_than_noon" in too_early.reasons
 

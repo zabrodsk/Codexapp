@@ -26,6 +26,18 @@ def _helper_payload(attention=True):
     }
 
 
+def _heavy_helper_payload():
+    evaluations = [
+        {"message_id": f"msg-{idx}", "important": True, "priority": "urgent"}
+        for idx in range(1, 5)
+    ]
+    return {
+        "status": "ok",
+        "messages": [{"message_id": item["message_id"], "subject": "Hidden"} for item in evaluations],
+        "evaluations": evaluations,
+    }
+
+
 def test_monday_same_day_proposal_uses_early_afternoon_window(tmp_path):
     payload = build_email_triage_proposals(
         planning_date="2026-05-25",
@@ -101,3 +113,55 @@ def test_existing_same_day_rocky_email_block_is_duplicate_skip():
 
     assert payload["status"] == "skipped_duplicate"
     assert payload["reason"] == "duplicate_rocky_block"
+
+
+def test_no_full_slot_falls_back_to_30_minute_split(tmp_path):
+    payload = build_email_triage_proposals(
+        planning_date="2026-05-25",
+        helper_payload=_heavy_helper_payload(),
+        existing_events=[
+            {
+                "summary": "Busy",
+                "description": "",
+                "start_local": "2026-05-25 12:30:00",
+                "end_local": "2026-05-25 17:30:00",
+                "calendar": "Calendar",
+                "all_day": False,
+            }
+        ],
+        ledger_path=tmp_path / "assistant_audit.jsonl",
+        now_local="2026-05-25T09:30:00+02:00",
+    )
+
+    proposal = payload["selected_proposal"]
+    assert payload["status"] == "proposal"
+    assert proposal["split_recovery"] is True
+    assert proposal["original_duration_minutes"] == 60
+    assert proposal["duration_minutes"] == 30
+    assert proposal["proposal"]["start"] == "2026-05-25T12:00:00+02:00"
+
+
+def test_no_thirty_minute_slot_falls_back_to_15_minute_split(tmp_path):
+    payload = build_email_triage_proposals(
+        planning_date="2026-05-25",
+        helper_payload=_heavy_helper_payload(),
+        existing_events=[
+            {
+                "summary": "Busy",
+                "description": "",
+                "start_local": "2026-05-25 12:15:00",
+                "end_local": "2026-05-25 17:30:00",
+                "calendar": "Calendar",
+                "all_day": False,
+            }
+        ],
+        ledger_path=tmp_path / "assistant_audit.jsonl",
+        now_local="2026-05-25T09:30:00+02:00",
+    )
+
+    proposal = payload["selected_proposal"]
+    assert payload["status"] == "proposal"
+    assert proposal["split_recovery"] is True
+    assert proposal["original_duration_minutes"] == 60
+    assert proposal["duration_minutes"] == 15
+    assert proposal["proposal"]["start"] == "2026-05-25T12:00:00+02:00"

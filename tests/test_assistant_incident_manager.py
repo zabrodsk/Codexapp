@@ -16,11 +16,11 @@ def _state(tmp_path):
     return AssistantSchedulerState(tmp_path / "assistant_scheduler.sqlite3")
 
 
-def _open_dead_letter(tmp_path, *, job_name="email_triage_booking", workflow="email_triage_scheduler", failure_class="no_available_slot", summary="No available email triage slot"):
+def _open_dead_letter(tmp_path, *, job_name="email_triage_booking", workflow="email_triage_scheduler", failure_class="no_available_slot", summary="No available email triage slot", idempotency_key=None):
     return _state(tmp_path).upsert_dead_letter(
         job_name=job_name,
         workflow=workflow,
-        idempotency_key=f"{job_name}:{failure_class}",
+        idempotency_key=idempotency_key or f"{job_name}:{failure_class}",
         failure_class=failure_class,
         safe_summary=summary,
         source_refs=["test-source"],
@@ -48,6 +48,7 @@ def test_no_slot_email_triage_becomes_waiting_for_user_with_options(tmp_path):
         quiet_minutes=0,
         post_func=poster,
         agentmail_send_func=emailer,
+        now_local="2026-05-25T10:00:00+02:00",
     )
 
     assert payload["status"] == "manual_review_required"
@@ -56,8 +57,42 @@ def test_no_slot_email_triage_becomes_waiting_for_user_with_options(tmp_path):
     assert emails
     text = emails[0]["text"].lower()
     assert "split email triage" in text
+    assert "15-30 minutes" in text
+    assert "60-minute minimum applies only to coding focus" in text
     assert "book the next allowed monday-thursday slot" in text
     assert "skip email triage" in text
+
+
+def test_stale_email_triage_no_slot_message_names_today_and_missed_date(tmp_path):
+    _open_dead_letter(
+        tmp_path,
+        idempotency_key="email-triage-scheduler:2026-05-25",
+        summary="no_available_slot",
+    )
+    emails = []
+
+    def emailer(**kwargs):
+        emails.append(kwargs)
+        return {"status": "posted", "message_id": "email-1"}
+
+    payload = run_incident_manager(
+        live=True,
+        scheduler_db_path=tmp_path / "assistant_scheduler.sqlite3",
+        ledger_path=tmp_path / "assistant_audit.jsonl",
+        state_file=tmp_path / "incident_state.json",
+        quiet_minutes=0,
+        post_func=lambda **kwargs: {"status": "failed", "reason": "discord_http_403", "status_code": 403},
+        agentmail_send_func=emailer,
+        now_local="2026-05-26T08:30:00+02:00",
+    )
+
+    assert payload["status"] == "manual_review_required"
+    text = emails[0]["text"]
+    assert "Rocky could not book email triage for 2026-05-25." in text
+    assert "Today is 2026-05-26" in text
+    assert "catch-up email triage" in text
+    assert "15-30 minutes" in text
+    assert "Skip/acknowledge the 2026-05-25 email triage incident" in text
 
 
 def test_daily_notification_failure_can_be_retried_without_calendar_or_notion_writes(tmp_path, monkeypatch):

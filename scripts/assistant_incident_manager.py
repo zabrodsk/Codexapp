@@ -16,6 +16,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 SCRIPTS = Path(__file__).resolve().parent
 if str(SCRIPTS) not in sys.path:
@@ -41,6 +42,7 @@ DEFAULT_STATE_FILE = Path("/Users/clawdbot/.openclaw/state/assistant_incident_ma
 DEFAULT_LOCK_TTL_SECONDS = 900
 INCIDENT_STATUSES = {"open", "notified", "waiting_for_user", "retrying", "recovered", "acknowledged", "ignored"}
 RESPOND_ACTIONS = {"acknowledge": "acknowledged", "ignore": "ignored", "recover": "recovered"}
+TIMEZONE = "Europe/Prague"
 
 
 def run_incident_manager(
@@ -57,6 +59,7 @@ def run_incident_manager(
     post_func: Any | None = None,
     agentmail_send_func: Any | None = None,
     write_audit: bool = True,
+    now_local: str | datetime | None = None,
 ) -> dict[str, Any]:
     run_key = f"assistant-incident-manager:{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M')}"
     lock = acquire_run_lock(
@@ -94,6 +97,7 @@ def run_incident_manager(
                 post_func=post_func,
                 agentmail_send_func=agentmail_send_func,
                 write_audit=write_audit,
+                now_local=now_local,
             ))
         status = "ok"
         if any(item.get("status") in {"waiting_for_user", "notified"} for item in processed):
@@ -138,6 +142,7 @@ def retry_incident(
     notification_dry_run: bool = False,
     post_func: Any | None = None,
     agentmail_send_func: Any | None = None,
+    now_local: str | datetime | None = None,
 ) -> dict[str, Any]:
     state = AssistantSchedulerState(scheduler_db_path)
     item = state.get_dead_letter(dead_letter_id)
@@ -155,6 +160,7 @@ def retry_incident(
         post_func=post_func,
         agentmail_send_func=agentmail_send_func,
         write_audit=True,
+        now_local=now_local,
     )
 
 
@@ -211,6 +217,7 @@ def _process_incident(
     post_func: Any | None,
     agentmail_send_func: Any | None,
     write_audit: bool,
+    now_local: str | datetime | None = None,
 ) -> dict[str, Any]:
     state = AssistantSchedulerState(scheduler_db_path)
     dead_letter_id = str(item.get("dead_letter_id"))
@@ -236,7 +243,7 @@ def _process_incident(
         )
         return _finalize_after_notification(item, result, recovered_on_success=True, scheduler_db_path=scheduler_db_path, ledger_path=ledger_path, write_audit=write_audit)
     if job_name == "email_triage_booking" and failure_class == "no_available_slot":
-        result = _notify_email_triage_no_slot(item, scheduler_db_path=scheduler_db_path, ledger_path=ledger_path, channel_id=channel_id, fallback_email=fallback_email, notification_dry_run=notification_dry_run, post_func=post_func, agentmail_send_func=agentmail_send_func)
+        result = _notify_email_triage_no_slot(item, scheduler_db_path=scheduler_db_path, ledger_path=ledger_path, channel_id=channel_id, fallback_email=fallback_email, notification_dry_run=notification_dry_run, post_func=post_func, agentmail_send_func=agentmail_send_func, now_local=now_local)
         status = "waiting_for_user" if result.get("status") in {"posted", "dry_run"} else "open"
         state.update_dead_letter_status(dead_letter_id, status)
         _audit_incident("assistant.incident_waiting_for_user", item, result, scheduler_db_path=scheduler_db_path, ledger_path=ledger_path, decision="observed", write_audit=write_audit)
@@ -312,19 +319,39 @@ def _resend_weekly(item: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
 
 
 def _notify_email_triage_no_slot(item: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
-    target_date = _date_from_item(item)
-    message = "\n".join([
-        f"Rocky could not book email triage for {target_date}.",
-        "",
-        "Reason: the calendar had no safe same-day slot for the estimated email triage block.",
-        "",
-        "Please choose one:",
-        "1. Split email triage into smaller chunks today if a slot opens.",
-        "2. Book the next allowed Monday-Thursday slot.",
-        "3. Skip email triage for today.",
-        "",
-        f"Incident: {item.get('dead_letter_id')}",
-    ])
+    today = _local_today(kwargs.get("now_local"))
+    target_date = _date_from_item(item, default_date=today)
+    if target_date < today:
+        heading = f"Rocky could not book email triage for {target_date}."
+        date_context = f"Today is {today}; this is an unresolved incident from the earlier run."
+        option_one = "1. Let Rocky book catch-up email triage in the smallest safe chunks today (15-30 minutes) if possible."
+        option_three = f"3. Skip/acknowledge the {target_date} email triage incident."
+    elif target_date == today:
+        heading = f"Rocky could not book email triage for today ({today})."
+        date_context = "This is today's email triage booking incident."
+        option_one = "1. Let Rocky split email triage into the smallest safe chunks today (15-30 minutes)."
+        option_three = "3. Skip email triage for today."
+    else:
+        heading = f"Rocky could not book email triage for {target_date}."
+        date_context = f"Today is {today}; this incident targets a future date."
+        option_one = "1. Let Rocky split email triage into the smallest safe chunks on the target date (15-30 minutes)."
+        option_three = f"3. Skip/acknowledge the {target_date} email triage incident."
+    message = "\n".join(
+        [
+            heading,
+            date_context,
+            "",
+            "Reason: the calendar had no safe same-day slot for the estimated email triage block.",
+            "Note: the 60-minute minimum applies only to coding focus blocks, not email triage.",
+            "",
+            "Please choose one:",
+            option_one,
+            "2. Book the next allowed Monday-Thursday slot.",
+            option_three,
+            "",
+            f"Incident: {item.get('dead_letter_id')}",
+        ]
+    )
     return dispatch_user_notification(
         workflow="email_triage_scheduler",
         message=message,
@@ -404,12 +431,23 @@ def _has_related_email_no_slot_guidance(state: AssistantSchedulerState) -> bool:
     return False
 
 
-def _date_from_item(item: dict[str, Any]) -> str:
+def _date_from_item(item: dict[str, Any], *, default_date: str | None = None) -> str:
     for value in [item.get("idempotency_key"), item.get("safe_summary"), item.get("recovery_hint")]:
         match = re.search(r"20[0-9]{2}-[0-9]{2}-[0-9]{2}", str(value or ""))
         if match:
             return match.group(0)
-    return datetime.now(timezone.utc).date().isoformat()
+    return default_date or _local_today(None)
+
+
+def _local_today(value: str | datetime | None) -> str:
+    if isinstance(value, datetime):
+        parsed = value.astimezone(ZoneInfo(TIMEZONE)) if value.tzinfo else value.replace(tzinfo=ZoneInfo(TIMEZONE))
+        return parsed.date().isoformat()
+    if value:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        parsed = parsed.astimezone(ZoneInfo(TIMEZONE)) if parsed.tzinfo else parsed.replace(tzinfo=ZoneInfo(TIMEZONE))
+        return parsed.date().isoformat()
+    return datetime.now(ZoneInfo(TIMEZONE)).date().isoformat()
 
 
 def _parse_dt(value: Any) -> datetime | None:

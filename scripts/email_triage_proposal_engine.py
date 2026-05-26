@@ -22,6 +22,7 @@ PREFERRED_WINDOW_END = "15:30"
 FALLBACK_WINDOW_START = "12:00"
 FALLBACK_WINDOW_END = "17:30"
 BOOKING_REASON = "Unread Inbox emails requiring manual attention"
+SPLIT_RECOVERY_DURATIONS_MINUTES = (30, 15)
 
 
 def build_email_triage_proposals(
@@ -146,6 +147,31 @@ def build_email_triage_proposals(
         )
         proposals.append(fallback)
         proposal = fallback
+    if proposal.get("reason") == "no_available_slot":
+        original_duration = int(estimate["estimated_minutes"])
+        tried_durations = {original_duration}
+        for split_duration in SPLIT_RECOVERY_DURATIONS_MINUTES:
+            if split_duration >= original_duration or split_duration in tried_durations:
+                continue
+            tried_durations.add(split_duration)
+            partial = _build_window_proposal(
+                planning_day=planning_day,
+                window_start=FALLBACK_WINDOW_START,
+                window_end=FALLBACK_WINDOW_END,
+                duration_minutes=split_duration,
+                attention=attention,
+                estimate=estimate,
+                db_path=db_path,
+                existing_events=day_events,
+                ledger_path=ledger_path,
+                write_audit=write_audit,
+            )
+            partial["split_recovery"] = True
+            partial["original_duration_minutes"] = original_duration
+            proposals.append(partial)
+            proposal = partial
+            if partial.get("status") == "proposal":
+                break
 
     status = "proposal" if proposal.get("status") == "proposal" else "blocked"
     return {
