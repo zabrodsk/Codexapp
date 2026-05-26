@@ -7,12 +7,11 @@ import json
 import re
 from pathlib import Path
 from typing import Any
-from urllib import error, request
 
+from assistant_notification_dispatcher import send_discord_message
 from task_command_ledger import TaskCommandLedger, command_fingerprint, safe_preview
 
 DEFAULT_OPENCLAW_CONFIG_PATH = Path("/Users/clawdbot/.openclaw/openclaw.json")
-DISCORD_API = "https://discord.com/api/v10"
 ACK_STATUSES = {"created", "updated", "skipped"}
 
 
@@ -38,9 +37,11 @@ def maybe_acknowledge_discord_command(
         return {"status": "skipped", "reason": "ack_already_sent", "ack_attempted": False}
     content = render_task_ack(command, result)
     try:
-        token = _load_discord_token(Path(config_path))
-        poster = post_func or _post_to_discord
-        delivery = poster(token=token, channel_id=channel_id, content=content)
+        if post_func:
+            token = _load_discord_token(Path(config_path))
+            delivery = post_func(token=token, channel_id=channel_id, content=content)
+        else:
+            delivery = send_discord_message(channel_id=channel_id, content=content)
     except Exception as exc:
         delivery = {"status": "failed", "reason": exc.__class__.__name__, "error_hash": _hash_text(str(exc))}
     if str(delivery.get("status")) in {"posted", "ok", "success"}:
@@ -79,21 +80,6 @@ def _load_discord_token(path: Path) -> str:
     if not token:
         raise RuntimeError("discord_token_missing")
     return token
-
-
-def _post_to_discord(*, token: str, channel_id: str, content: str) -> dict[str, Any]:
-    req = request.Request(
-        f"{DISCORD_API}/channels/{channel_id}/messages",
-        data=json.dumps({"content": content}).encode("utf-8"),
-        headers={"Authorization": f"Bot {token}", "Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with request.urlopen(req, timeout=15) as response:
-            body = json.loads(response.read().decode("utf-8"))
-            return {"status": "posted", "channel_id": channel_id, "message_ids": [body.get("id")]}
-    except error.HTTPError as exc:
-        return {"status": "failed", "reason": f"discord_http_{exc.code}", "error_hash": _hash_text(str(exc))}
 
 
 def _safe_delivery(delivery: dict[str, Any]) -> dict[str, Any]:

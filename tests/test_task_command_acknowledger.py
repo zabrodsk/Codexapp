@@ -49,6 +49,24 @@ def test_ack_failure_records_ack_failed_without_rolling_back_task(tmp_path):
     assert row["task_title"] == "Call Jana"
 
 
+def test_discord_ack_default_uses_openclaw_message_path(monkeypatch, tmp_path):
+    ledger = TaskCommandLedger(tmp_path / "commands.sqlite3")
+    command = {"source": "Discord", "source_channel": "discord", "source_ref": "discord:c:m", "text": "Rocky remember to call Jana", "channel_id": "c"}
+    ledger.record_seen(command)
+    ledger.update_outcome(source_ref="discord:c:m", command_fingerprint=command_fingerprint(command), status="applied", task={"title": "Call Jana"})
+    sent = []
+
+    def fake_send(**kwargs):
+        sent.append(kwargs)
+        return {"status": "posted", "channel_id": kwargs["channel_id"], "message_ids": ["ack1"]}
+
+    monkeypatch.setattr("task_command_acknowledger.send_discord_message", fake_send)
+    payload = maybe_acknowledge_discord_command(command, {"status": "created", "task": {"title": "Call Jana"}}, ledger=ledger)
+
+    assert payload["status"] == "ack_sent"
+    assert sent == [{"channel_id": "c", "content": "Got it. Added task: Call Jana"}]
+
+
 def test_email_and_meeting_acknowledgements_are_skipped(tmp_path):
     ledger = TaskCommandLedger(tmp_path / "commands.sqlite3")
     command = {"source": "Command", "source_channel": "email", "source_ref": "agentmail:m", "text": "Remember to call Jana"}

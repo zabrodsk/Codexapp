@@ -10,9 +10,10 @@ import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib import parse, request
+from urllib import parse
 
-from discord_task_command_reader import DEFAULT_OPENCLAW_CONFIG_PATH, DISCORD_API_BASE, _load_config
+from assistant_notification_dispatcher import send_discord_message
+from discord_task_command_reader import DEFAULT_OPENCLAW_CONFIG_PATH, _load_config, _message_id_after, _openclaw_discord_read
 from meeting_context_note_ledger import (
     DEFAULT_LEDGER_DB,
     MeetingContextNoteLedger,
@@ -130,7 +131,7 @@ def read_discord_context_notes(
     state = _read_json(state_path)
     now_dt = now or datetime.now(timezone.utc)
     cutoff = now_dt - timedelta(minutes=max(1, int(since_minutes)))
-    getter = http_get or _discord_get
+    getter = http_get or _openclaw_discord_read
     notes: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
     latest_by_channel: dict[str, str] = {}
@@ -140,7 +141,12 @@ def read_discord_context_notes(
             after = ((state.get("channels") or {}).get(str(channel_id)) or {}).get("last_message_id")
             if after:
                 params["after"] = str(after)
-            messages = getter(token, f"/channels/{channel_id}/messages?{parse.urlencode(params)}")
+            if http_get:
+                messages = getter(token, f"/channels/{channel_id}/messages?{parse.urlencode(params)}")
+            else:
+                messages = getter(channel_id=str(channel_id), limit=max(1, min(int(limit), 100)))
+                if after:
+                    messages = [msg for msg in messages if _message_id_after(str(msg.get("id") or ""), str(after))]
             for msg in reversed(messages if isinstance(messages, list) else []):
                 if not _accepted_message(msg, dusan_user_id=dusan_user_id, cutoff=cutoff):
                     continue
@@ -190,11 +196,13 @@ def _acknowledge_note(note: dict[str, Any], *, ledger: MeetingContextNoteLedger,
     if notification_dry_run:
         return {"status": "dry_run", "reason": "notification_dry_run", "message_preview": message[:200], "message_sha256": hash_text(message)}
     try:
-        token = (_read_json(config_path).get("channels") or {}).get("discord", {}).get("token") or os.getenv("DISCORD_TOKEN")
-        if not token:
-            raise RuntimeError("discord_token_missing")
-        poster = post_func or _post_discord
-        delivery = poster(token=token, channel_id=str(note.get("channel_id") or ""), content=message)
+        if post_func:
+            token = (_read_json(config_path).get("channels") or {}).get("discord", {}).get("token") or os.getenv("DISCORD_TOKEN")
+            if not token:
+                raise RuntimeError("discord_token_missing")
+            delivery = post_func(token=token, channel_id=str(note.get("channel_id") or ""), content=message)
+        else:
+            delivery = send_discord_message(channel_id=str(note.get("channel_id") or ""), content=message)
     except Exception as exc:
         ledger.update_ack(source_ref=source_ref, note_fingerprint=fp, status="ack_failed", reason=exc.__class__.__name__)
         return {"status": "ack_failed", "reason": exc.__class__.__name__, "error_hash": hash_text(str(exc))}
@@ -205,18 +213,6 @@ def _acknowledge_note(note: dict[str, Any], *, ledger: MeetingContextNoteLedger,
     return {"status": "ack_failed", "reason": str(delivery.get("reason") or "discord_post_failed"), "error_hash": delivery.get("error_hash")}
 
 
-def _post_discord(*, token: str, channel_id: str, content: str) -> dict[str, Any]:
-    req = request.Request(
-        f"{DISCORD_API_BASE}/channels/{channel_id}/messages",
-        data=json.dumps({"content": content}).encode("utf-8"),
-        headers={"Authorization": f"Bot {token}", "Content-Type": "application/json"},
-        method="POST",
-    )
-    with request.urlopen(req, timeout=15) as response:
-        body = json.loads(response.read().decode("utf-8"))
-        return {"status": "posted", "message_ids": [body.get("id")], "channel_id": channel_id}
-
-
 def _accepted_message(msg: dict[str, Any], *, dusan_user_id: str, cutoff: datetime) -> bool:
     author = msg.get("author") or {}
     if author.get("bot"):
@@ -225,12 +221,6 @@ def _accepted_message(msg: dict[str, Any], *, dusan_user_id: str, cutoff: dateti
         return False
     timestamp = _parse_dt(msg.get("timestamp"))
     return bool(timestamp is None or timestamp >= cutoff)
-
-
-def _discord_get(token: str, path: str) -> Any:
-    req = request.Request(f"{DISCORD_API_BASE}{path}", headers={"Authorization": f"Bot {token}", "User-Agent": "RockyMeetingContextNoteCapture/1.0"}, method="GET")
-    with request.urlopen(req, timeout=20) as response:
-        return json.loads(response.read().decode("utf-8"))
 
 
 def _strip_rocky_prefix(value: str) -> str:

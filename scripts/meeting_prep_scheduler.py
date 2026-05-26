@@ -10,7 +10,6 @@ import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from urllib import error, request
 from zoneinfo import ZoneInfo
 
 SCRIPTS = Path(__file__).resolve().parent
@@ -18,7 +17,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from assistant_audit_log import AssistantAuditLog
-from assistant_notification_dispatcher import DEFAULT_ALERT_CHANNEL_ID, DEFAULT_OPENCLAW_CONFIG_PATH
+from assistant_notification_dispatcher import DEFAULT_ALERT_CHANNEL_ID, dispatch_user_notification
 from assistant_run_lock import acquire_run_lock, release_run_lock
 from assistant_scheduler_state import AssistantSchedulerState, utc_now_iso
 from meeting_calendar_reader import read_upcoming_meetings
@@ -34,7 +33,6 @@ POLICY_VERSION = "rocky-meeting-prep-v1"
 TIMEZONE = "Europe/Prague"
 DEFAULT_STATE_FILE = Path("/Users/clawdbot/.openclaw/state/meeting_prep_scheduler.json")
 DEFAULT_LOCK_TTL_SECONDS = 600
-DISCORD_API = "https://discord.com/api/v10"
 SENSITIVE_RE = re.compile(r"(https?://[^\s]*(?:token|secret|password|credential|auth|cookie)[^\s]*|cookie|token|secret|password|credential|Bearer\s+|\bsk-[A-Za-z0-9])", re.IGNORECASE)
 
 
@@ -227,8 +225,15 @@ def _send_discord(message: str | None, *, channel_id: str, dry_run: bool, post_f
     if dry_run:
         return {"status": "dry_run", "reason": "notification_dry_run", "channel_id": channel_id, "message_preview": safe_message[:700], "message_sha256": _hash_text(safe_message), "notification_attempted": False}
     try:
-        token = _load_discord_token(DEFAULT_OPENCLAW_CONFIG_PATH)
-        delivery = (post_func or _post_to_discord)(token=token, channel_id=channel_id, content=safe_message)
+        delivery = dispatch_user_notification(
+            workflow=WORKFLOW,
+            message=safe_message,
+            subject="Rocky meeting prep briefing",
+            reason="meeting_prep_briefing",
+            idempotency_key=f"meeting-prep:{meeting_key}:{message_hash or _hash_text(safe_message)}",
+            channel_id=channel_id,
+            post_func=post_func,
+        )
     except Exception as exc:
         return {"status": "failed", "reason": exc.__class__.__name__, "error_hash": _hash_text(str(exc)), "notification_attempted": True}
     if state_file and str(delivery.get("status") or "posted") in {"posted", "ok", "success"}:
@@ -284,24 +289,6 @@ def _mark_sent(path: Path, *, meeting_key: str, message_hash: str) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(_redact_payload(state), indent=2, sort_keys=True) + "\n", encoding="utf-8")
     tmp.replace(path)
-
-
-def _post_to_discord(*, token: str, channel_id: str, content: str) -> dict[str, Any]:
-    req = request.Request(f"{DISCORD_API}/channels/{channel_id}/messages", data=json.dumps({"content": content}).encode("utf-8"), headers={"Authorization": f"Bot {token}", "Content-Type": "application/json"}, method="POST")
-    try:
-        with request.urlopen(req, timeout=15) as response:
-            body = json.loads(response.read().decode("utf-8"))
-            return {"status": "posted", "channel_id": channel_id, "message_ids": [body.get("id")]}
-    except error.HTTPError as exc:
-        return {"status": "failed", "reason": f"discord_http_{exc.code}", "error_hash": _hash_text(str(exc))}
-
-
-def _load_discord_token(path: Path) -> str:
-    payload = _read_json(path)
-    token = (((payload.get("channels") or {}).get("discord") or {}).get("token") or "").strip()
-    if not token:
-        raise RuntimeError("discord_token_missing")
-    return token
 
 
 def _parse_now(value: str | datetime | None) -> datetime:

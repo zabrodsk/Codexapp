@@ -48,3 +48,38 @@ def test_discord_reader_accepts_only_dusan_explicit_commands(tmp_path):
     assert payload["command_count"] == 1
     assert payload["commands"][0]["source_ref"] == "discord:c1:2"
     assert "discord-token" not in json.dumps(payload)
+
+
+def test_discord_reader_default_uses_openclaw_message_read(monkeypatch, tmp_path):
+    config = tmp_path / "openclaw.json"
+    config.write_text(
+        json.dumps(
+            {
+                "channels": {
+                    "discord": {
+                        "token": "discord-token",
+                        "guilds": {"g1": {"channels": {"c1": {"requireMention": True}}}},
+                    }
+                },
+                "agentmail": {"approverDiscordUserId": "u1"},
+            }
+        )
+    )
+
+    def fake_openclaw_read(**kwargs):
+        assert kwargs == {"channel_id": "c1", "limit": 25}
+        return [
+            {"id": "2", "content": "Rocky remember to call Jana", "timestamp": "2026-05-23T10:01:00+00:00", "author": {"id": "u1"}},
+            {"id": "1", "content": "ordinary chat", "timestamp": "2026-05-23T10:00:00+00:00", "author": {"id": "u1"}},
+        ]
+
+    monkeypatch.setattr("discord_task_command_reader._openclaw_discord_read", fake_openclaw_read)
+    payload = read_discord_task_commands(
+        config_path=config,
+        state_file=tmp_path / "state.json",
+        now=datetime(2026, 5, 23, 10, 5, tzinfo=timezone.utc),
+    )
+
+    assert payload["status"] == "ok"
+    assert payload["command_count"] == 1
+    assert payload["commands"][0]["source_ref"] == "discord:c1:2"

@@ -15,7 +15,6 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
-from urllib import error, request
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = Path(__file__).resolve().parent
@@ -33,9 +32,9 @@ DEFAULT_OPENCLAW_CONFIG_PATH = Path("/Users/clawdbot/.openclaw/openclaw.json")
 DEFAULT_AGENTMAIL_CONFIG_PATH = Path("/Users/clawdbot/.openclaw/agentmail-bridge/config.json")
 DEFAULT_AGENTMAIL_CREDENTIALS_PATH = Path("/Users/clawdbot/.openclaw/credentials/agentmail.json")
 DEFAULT_AGENTMAIL_BRIDGE_ROOT = Path("/Users/clawdbot/.openclaw/agentmail-bridge")
+DEFAULT_OPENCLAW_BIN = Path("/opt/homebrew/bin/openclaw")
 POLICY_VERSION = "rocky-notification-policy-v2"
 WORKFLOW = "assistant_notification_dispatcher"
-DISCORD_API = "https://discord.com/api/v10"
 ATTENTION_STATUSES = {
     "blocked",
     "failed",
@@ -486,23 +485,12 @@ console.log(JSON.stringify({
 
 def _discord_health(*, channel_id: str, config_path: Path, check_discord: bool) -> dict[str, Any]:
     try:
-        token = _load_discord_token(config_path)
+        _load_discord_token(config_path)
     except Exception as exc:
         return {"status": "blocked", "reason": exc.__class__.__name__, "token_configured": False}
     if not check_discord:
         return {"status": "ok", "reason": "discord_token_configured", "token_configured": True, "channel_id": channel_id}
-    req = request.Request(
-        f"{DISCORD_API}/channels/{channel_id}",
-        headers={"Authorization": f"Bot {token}", "Content-Type": "application/json"},
-        method="GET",
-    )
-    try:
-        with request.urlopen(req, timeout=10) as response:
-            return {"status": "ok", "reason": "discord_channel_access_ok", "channel_id": channel_id, "http_status": response.status}
-    except error.HTTPError as exc:
-        return {"status": "blocked", "reason": _classify_reason(f"discord_http_{exc.code}"), "channel_id": channel_id, "http_status": exc.code}
-    except Exception as exc:
-        return {"status": "blocked", "reason": exc.__class__.__name__, "channel_id": channel_id, "error_hash": _hash_text(str(exc))}
+    return _openclaw_discord_read_probe(channel_id=channel_id)
 
 
 def _agentmail_health(*, fallback_email: str, config_path: Path, credentials_path: Path) -> dict[str, Any]:
@@ -536,18 +524,108 @@ def _load_discord_token(path: Path) -> str:
 
 
 def _post_to_discord(*, token: str, channel_id: str, content: str) -> dict[str, Any]:
-    req = request.Request(
-        f"{DISCORD_API}/channels/{channel_id}/messages",
-        data=json.dumps({"content": content}).encode("utf-8"),
-        headers={"Authorization": f"Bot {token}", "Content-Type": "application/json"},
-        method="POST",
+    return _send_openclaw_discord(channel_id=channel_id, content=content)
+
+
+def send_discord_message(*, channel_id: str, content: str) -> dict[str, Any]:
+    """Send through OpenClaw's Discord channel instead of direct Discord REST."""
+    return _send_openclaw_discord(channel_id=channel_id, content=content)
+
+
+def _send_openclaw_discord(*, channel_id: str, content: str) -> dict[str, Any]:
+    proc = subprocess.run(
+        [
+            str(DEFAULT_OPENCLAW_BIN),
+            "message",
+            "send",
+            "--channel",
+            "discord",
+            "--target",
+            f"channel:{channel_id}",
+            "--message",
+            content,
+            "--json",
+        ],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        timeout=30,
+        check=False,
     )
+    output = (proc.stdout or "") + (proc.stderr or "")
+    if proc.returncode != 0:
+        return {"status": "failed", "reason": "openclaw_discord_send_failed", "error_hash": _hash_text(output)}
     try:
-        with request.urlopen(req, timeout=15) as response:
-            body = json.loads(response.read().decode("utf-8"))
-            return {"status": "posted", "channel_id": channel_id, "message_ids": [body.get("id")]}
-    except error.HTTPError as exc:
-        return {"status": "failed", "reason": f"discord_http_{exc.code}", "error_hash": _hash_text(str(exc))}
+        payload = json.loads(proc.stdout or "{}")
+    except Exception:
+        payload = {}
+    result = payload.get("payload") if isinstance(payload.get("payload"), dict) else payload
+    message_ids = _extract_message_ids(result)
+    return {
+        "status": "posted",
+        "reason": "posted",
+        "channel_id": channel_id,
+        "message_ids": message_ids,
+        "handled_by": payload.get("handledBy"),
+    }
+
+
+def _openclaw_discord_read_probe(*, channel_id: str) -> dict[str, Any]:
+    proc = subprocess.run(
+        [
+            str(DEFAULT_OPENCLAW_BIN),
+            "message",
+            "read",
+            "--channel",
+            "discord",
+            "--target",
+            f"channel:{channel_id}",
+            "--json",
+        ],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    output = (proc.stdout or "") + (proc.stderr or "")
+    if proc.returncode != 0:
+        return {"status": "blocked", "reason": "openclaw_discord_read_failed", "channel_id": channel_id, "error_hash": _hash_text(output)}
+    try:
+        payload = json.loads(proc.stdout or "{}")
+    except Exception:
+        payload = {}
+    inner = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+    ok = bool(inner.get("ok", True))
+    return {
+        "status": "ok" if ok else "blocked",
+        "reason": "openclaw_discord_channel_access_ok" if ok else "openclaw_discord_channel_access_blocked",
+        "channel_id": channel_id,
+        "handled_by": payload.get("handledBy"),
+        "message_count": len(inner.get("messages") or []),
+    }
+
+
+def _extract_message_ids(value: Any) -> list[str]:
+    ids: list[str] = []
+
+    def visit(item: Any) -> None:
+        if isinstance(item, dict):
+            for key, child in item.items():
+                if key in {"id", "message_id", "messageId"} and child:
+                    ids.append(str(child))
+                elif key in {"ids", "message_ids", "messageIds"} and isinstance(child, list):
+                    ids.extend(str(part) for part in child if part)
+                else:
+                    visit(child)
+        elif isinstance(item, list):
+            for child in item:
+                visit(child)
+
+    visit(value)
+    return list(dict.fromkeys(ids))
 
 
 def _notification_key(payload: dict[str, Any]) -> str:

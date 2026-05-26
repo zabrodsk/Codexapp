@@ -10,6 +10,7 @@ if str(SCRIPTS) not in sys.path:
 
 from assistant_notification_dispatcher import (
     DEFAULT_ALERT_CHANNEL_ID,
+    build_notification_health,
     dispatch_failure_notification,
     render_notification,
     should_notify,
@@ -67,6 +68,57 @@ def test_notification_success_audits_without_logging_token(tmp_path):
     rendered = (tmp_path / "assistant_audit.jsonl").read_text()
     assert "super-secret-token" not in rendered
     assert "assistant.notification_sent" in rendered
+
+
+def test_notification_success_uses_openclaw_message_path_by_default(tmp_path, monkeypatch):
+    config = tmp_path / "openclaw.json"
+    config.write_text(json.dumps({"channels": {"discord": {"token": "super-secret-token"}}}))
+
+    def fake_run(args, **kwargs):
+        assert args[:3] == ["/opt/homebrew/bin/openclaw", "message", "send"]
+        assert "discord" in args
+        assert "channel:channel-1" in args
+        return type("Result", (), {"returncode": 0, "stdout": json.dumps({"handledBy": "plugin", "payload": {"ok": True, "message": {"id": "m1"}}}), "stderr": ""})()
+
+    monkeypatch.setattr("assistant_notification_dispatcher.subprocess.run", fake_run)
+    payload = dispatch_failure_notification(
+        {"status": "blocked", "reason": "calendar_write_health_not_ok"},
+        channel_id="channel-1",
+        config_path=config,
+        ledger_path=tmp_path / "assistant_audit.jsonl",
+        scheduler_db_path=tmp_path / "assistant_scheduler.sqlite3",
+    )
+
+    assert payload["status"] == "posted"
+    assert payload["deliveries"][0]["message_ids"] == ["m1"]
+    assert "super-secret-token" not in json.dumps(payload)
+
+
+def test_notification_health_uses_openclaw_read_path(tmp_path, monkeypatch):
+    config = tmp_path / "openclaw.json"
+    config.write_text(json.dumps({"channels": {"discord": {"token": "super-secret-token"}}}))
+    agentmail_config = tmp_path / "agentmail.json"
+    agentmail_config.write_text(json.dumps({"inbox": "rocky@example.com"}))
+    creds = tmp_path / "creds.json"
+    creds.write_text(json.dumps({"apiKey": "secret", "inboxId": "inbox"}))
+
+    def fake_run(args, **kwargs):
+        assert args[:3] == ["/opt/homebrew/bin/openclaw", "message", "read"]
+        return type("Result", (), {"returncode": 0, "stdout": json.dumps({"handledBy": "plugin", "payload": {"ok": True, "messages": [{"id": "m1"}]}}), "stderr": ""})()
+
+    monkeypatch.setattr("assistant_notification_dispatcher.subprocess.run", fake_run)
+    monkeypatch.setattr("assistant_notification_dispatcher.build_agentmail_bridge_health", lambda **kwargs: {"status": "ok"})
+    payload = build_notification_health(
+        channel_id="channel-1",
+        config_path=config,
+        agentmail_config_path=agentmail_config,
+        agentmail_credentials_path=creds,
+        write_audit=False,
+    )
+
+    assert payload["status"] == "ok"
+    assert payload["discord"]["status"] == "ok"
+    assert payload["discord"]["reason"] == "openclaw_discord_channel_access_ok"
 
 
 def test_notification_failure_creates_dead_letter(tmp_path):

@@ -80,3 +80,36 @@ def test_dry_run_does_not_write_ledger(tmp_path):
 
     assert payload["notes_recorded"] == 0
     assert MeetingContextNoteLedger(tmp_path / "notes.sqlite3").recent(limit=1) == []
+
+
+def test_context_note_default_uses_openclaw_read_and_ack(monkeypatch, tmp_path):
+    config = tmp_path / "openclaw.json"
+    config.write_text(json.dumps({"channels": {"discord": {"token": "t", "guilds": {"g": {"channels": {"123": {"requireMention": True}}}}}}, "agentmail": {"approverDiscordUserId": "u1"}}))
+
+    def fake_read(**kwargs):
+        assert kwargs == {"channel_id": "123", "limit": 25}
+        return [
+            {
+                "id": "m1",
+                "content": "Rocky, on the way to the office use this for my meeting: runway concern.",
+                "timestamp": "2026-05-25T07:30:00+00:00",
+                "author": {"id": "u1"},
+            }
+        ]
+
+    sent = []
+    monkeypatch.setattr("meeting_context_note_capture._openclaw_discord_read", fake_read)
+    monkeypatch.setattr("meeting_context_note_capture.send_discord_message", lambda **kwargs: sent.append(kwargs) or {"status": "posted", "message_ids": ["ack1"]})
+    payload = run_meeting_context_note_capture(
+        live=True,
+        config_path=config,
+        state_file=tmp_path / "state.json",
+        ledger_db_path=tmp_path / "notes.sqlite3",
+        now=datetime(2026, 5, 25, 8, 0, tzinfo=timezone.utc),
+    )
+
+    assert payload["status"] == "ok"
+    assert payload["notes_recorded"] == 1
+    assert payload["ack_sent"] == 1
+    assert sent[0]["channel_id"] == "123"
+    assert "runway concern" in sent[0]["content"]

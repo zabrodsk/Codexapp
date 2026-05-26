@@ -10,7 +10,6 @@ import sys
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
-from urllib import error, request
 from zoneinfo import ZoneInfo
 
 SCRIPTS = Path(__file__).resolve().parent
@@ -18,7 +17,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from assistant_calendar_status import calendar_write_health
-from assistant_notification_dispatcher import DEFAULT_ALERT_CHANNEL_ID, DEFAULT_OPENCLAW_CONFIG_PATH, dispatch_failure_notification
+from assistant_notification_dispatcher import DEFAULT_ALERT_CHANNEL_ID, dispatch_failure_notification, dispatch_user_notification
 from assistant_run_lock import acquire_run_lock, release_run_lock
 from assistant_scheduler_state import AssistantSchedulerState, utc_now_iso
 from coding_focus_live_booking import book_coding_focus_proposal
@@ -174,38 +173,16 @@ def _run_inner(
 
 def _send_briefing(briefing: dict[str, Any], *, channel_id: str, dry_run: bool, post_func: Any | None = None) -> dict[str, Any]:
     message = _redact_text(str(briefing.get("briefing") or "Rocky coding briefing is empty."))[:1800]
-    if dry_run:
-        return {"status": "dry_run", "reason": "notification_dry_run", "channel_id": channel_id, "message_sha256": _hash_text(message), "notification_attempted": False, "message_preview": message[:500]}
-    try:
-        token = _load_discord_token(DEFAULT_OPENCLAW_CONFIG_PATH)
-        poster = post_func or _post_to_discord
-        delivery = poster(token=token, channel_id=channel_id, content=message)
-    except Exception as exc:
-        return {"status": "failed", "reason": exc.__class__.__name__, "error_hash": _hash_text(str(exc)), "notification_attempted": True}
-    return {"status": delivery.get("status") or "posted", "channel_id": channel_id, "message_sha256": _hash_text(message), "notification_attempted": True}
-
-
-def _load_discord_token(path: Path) -> str:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    token = (((payload.get("channels") or {}).get("discord") or {}).get("token") or "").strip()
-    if not token:
-        raise RuntimeError("discord_token_missing")
-    return token
-
-
-def _post_to_discord(*, token: str, channel_id: str, content: str) -> dict[str, Any]:
-    req = request.Request(
-        f"https://discord.com/api/v10/channels/{channel_id}/messages",
-        data=json.dumps({"content": content}).encode("utf-8"),
-        headers={"Authorization": f"Bot {token}", "Content-Type": "application/json"},
-        method="POST",
+    return dispatch_user_notification(
+        workflow=WORKFLOW,
+        message=message,
+        subject="Rocky coding work briefing",
+        reason="coding_work_briefing",
+        idempotency_key=f"coding-work-briefing:{_hash_text(message)}",
+        channel_id=channel_id,
+        dry_run=dry_run,
+        post_func=post_func,
     )
-    try:
-        with request.urlopen(req, timeout=15) as response:
-            body = json.loads(response.read().decode("utf-8"))
-            return {"status": "posted", "channel_id": channel_id, "message_ids": [body.get("id")]}
-    except error.HTTPError as exc:
-        return {"status": "failed", "reason": f"discord_http_{exc.code}", "error_hash": _hash_text(str(exc))}
 
 
 def _finish(payload: dict[str, Any], *, scheduler_db_path: str | Path | None, state_file: str | Path | None, notify: bool = False, notification_dry_run: bool = False, notification_channel_id: str | None = None, post_func: Any | None = None, dead_letter: bool = False) -> dict[str, Any]:

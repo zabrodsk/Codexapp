@@ -6,15 +6,17 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib import parse, request
+from urllib import parse
+
+from assistant_notification_dispatcher import DEFAULT_OPENCLAW_BIN
 
 
 DEFAULT_OPENCLAW_CONFIG_PATH = Path("/Users/clawdbot/.openclaw/openclaw.json")
 DEFAULT_STATE_FILE = Path("/Users/clawdbot/.openclaw/state/discord_task_command_reader.json")
-DISCORD_API_BASE = "https://discord.com/api/v10"
 COMMAND_RE = re.compile(
     r"^\s*(?:<@!?\d+>\s*)?(?:rocky[:,]?\s*)?(remember|add task|create task|todo|mark .*done|done:|cancel task|forget task|remind me)\b",
     re.IGNORECASE,
@@ -49,7 +51,7 @@ def read_discord_task_commands(
     state = _read_json(state_path)
     now_dt = now or datetime.now(timezone.utc)
     cutoff = now_dt - timedelta(minutes=max(1, int(since_minutes)))
-    getter = http_get or _discord_get
+    getter = http_get or _openclaw_discord_read
     commands: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
     latest_by_channel: dict[str, str] = {}
@@ -59,7 +61,12 @@ def read_discord_task_commands(
             after = ((state.get("channels") or {}).get(str(channel_id)) or {}).get("last_message_id")
             if after:
                 params["after"] = str(after)
-            messages = getter(token, f"/channels/{channel_id}/messages?{parse.urlencode(params)}")
+            if http_get:
+                messages = getter(token, f"/channels/{channel_id}/messages?{parse.urlencode(params)}")
+            else:
+                messages = getter(channel_id=str(channel_id), limit=max(1, min(int(limit), 100)))
+                if after:
+                    messages = [msg for msg in messages if _message_id_after(str(msg.get("id") or ""), str(after))]
             for msg in reversed(messages if isinstance(messages, list) else []):
                 if not _accepted_message(msg, dusan_user_id=dusan_user_id, cutoff=cutoff):
                     continue
@@ -107,14 +114,39 @@ def _accepted_message(msg: dict[str, Any], *, dusan_user_id: str, cutoff: dateti
     return bool(timestamp is None or timestamp >= cutoff)
 
 
-def _discord_get(token: str, path: str) -> Any:
-    req = request.Request(
-        f"{DISCORD_API_BASE}{path}",
-        headers={"Authorization": f"Bot {token}", "User-Agent": "RockyTaskCommandCapture/1.0"},
-        method="GET",
+def _openclaw_discord_read(*, channel_id: str, limit: int = 25) -> list[dict[str, Any]]:
+    proc = subprocess.run(
+        [
+            str(DEFAULT_OPENCLAW_BIN),
+            "message",
+            "read",
+            "--channel",
+            "discord",
+            "--target",
+            f"channel:{channel_id}",
+            "--json",
+        ],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        timeout=30,
+        check=False,
     )
-    with request.urlopen(req, timeout=20) as response:
-        return json.loads(response.read().decode("utf-8"))
+    output = (proc.stdout or "") + (proc.stderr or "")
+    if proc.returncode != 0:
+        raise RuntimeError(f"openclaw_discord_read_failed:{_hash_text(output)}")
+    payload = json.loads(proc.stdout or "{}")
+    inner = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+    messages = inner.get("messages") or []
+    return messages[: max(1, min(int(limit), 100))] if isinstance(messages, list) else []
+
+
+def _message_id_after(message_id: str, after: str) -> bool:
+    try:
+        return int(message_id) > int(after)
+    except Exception:
+        return message_id > after
 
 
 def _load_config(path: Path) -> dict[str, Any]:
