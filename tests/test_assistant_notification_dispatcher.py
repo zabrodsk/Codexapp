@@ -116,6 +116,9 @@ def test_discord_403_falls_back_to_agentmail(tmp_path):
     assert payload["fallback_used"] is True
     assert payload["primary_failure_reason"] == "discord_permission_denied"
     assert emails and emails[0]["to"] == "dusan.zabrodsky@rockaway.cz"
+    assert "Fallback email from Rocky" in emails[0]["text"]
+    assert "Primary Discord delivery failed: discord_permission_denied" in emails[0]["text"]
+    assert "email only because the primary Discord route is unavailable" in emails[0]["text"]
     assert AssistantSchedulerState(tmp_path / "assistant_scheduler.sqlite3").list_dead_letters() == []
 
 

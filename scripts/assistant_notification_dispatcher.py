@@ -225,10 +225,11 @@ def dispatch_assistant_notification(
     fallback_allowed = allow_agentmail_fallback and not (post_func is not None and agentmail_send_func is None)
     if fallback_allowed:
         fallback_used = True
+        fallback_text = _fallback_email_text(safe_message, discord_delivery)
         agentmail_delivery = _deliver_agentmail(
             to_email=fallback_email,
             subject=safe_subject,
-            text=safe_message,
+            text=fallback_text,
             config_path=Path(agentmail_config_path),
             credentials_path=Path(agentmail_credentials_path),
             send_func=agentmail_send_func,
@@ -591,6 +592,19 @@ def _safe_message(value: str) -> str:
 def _safe_subject(value: str) -> str:
     text = re.sub(r"\s+", " ", SENSITIVE_TEXT_RE.sub("[redacted]", str(value or ""))).strip()
     return text[:180] or "Rocky assistant notification"
+
+
+def _fallback_email_text(message: str, discord_delivery: dict[str, Any]) -> str:
+    reason = str(discord_delivery.get("reason") or "discord_delivery_failed")
+    header = "\n".join(
+        [
+            "Fallback email from Rocky.",
+            f"Primary Discord delivery failed: {reason}.",
+            "Rocky is using email only because the primary Discord route is unavailable.",
+            "",
+        ]
+    )
+    return _safe_message(header + str(message or ""))
 
 
 def _redact(value: Any, *, parent_key: str = "") -> Any:

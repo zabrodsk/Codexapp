@@ -95,6 +95,40 @@ def test_stale_email_triage_no_slot_message_names_today_and_missed_date(tmp_path
     assert "Skip/acknowledge the 2026-05-25 email triage incident" in text
 
 
+def test_email_triage_proposal_not_found_gets_human_guidance_not_raw_status(tmp_path):
+    _open_dead_letter(
+        tmp_path,
+        failure_class="email_triage_proposal_not_found",
+        idempotency_key="email-triage-scheduler:2026-05-26",
+        summary="email_triage_proposal_not_found",
+    )
+    emails = []
+
+    def emailer(**kwargs):
+        emails.append(kwargs)
+        return {"status": "posted", "message_id": "email-1"}
+
+    payload = run_incident_manager(
+        live=True,
+        scheduler_db_path=tmp_path / "assistant_scheduler.sqlite3",
+        ledger_path=tmp_path / "assistant_audit.jsonl",
+        state_file=tmp_path / "incident_state.json",
+        quiet_minutes=0,
+        post_func=lambda **kwargs: {"status": "failed", "reason": "discord_http_403", "status_code": 403},
+        agentmail_send_func=emailer,
+        now_local="2026-05-26T09:45:00+02:00",
+    )
+
+    assert payload["status"] == "manual_review_required"
+    text = emails[0]["text"]
+    assert "Rocky could not finalize email triage for today (2026-05-26)." in text
+    assert "unread-mail proposal changed between planning and live booking" in text
+    assert "stopped before writing Calendar" in text
+    assert "15-30 minute chunks" in text
+    assert "Status: manual_review_required" not in text
+    assert "Idempotency key:" not in text
+
+
 def test_daily_notification_failure_can_be_retried_without_calendar_or_notion_writes(tmp_path, monkeypatch):
     dead = _open_dead_letter(
         tmp_path,

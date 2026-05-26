@@ -26,6 +26,7 @@ def book_email_triage_proposal(
     ledger_path: str | Path | None = None,
     helper_payload: dict[str, Any] | None = None,
     existing_events: list[dict[str, Any]] | None = None,
+    proposal_payload: dict[str, Any] | None = None,
     health_payload: dict[str, Any] | None = None,
     now_local: str | datetime | None = None,
 ) -> dict[str, Any]:
@@ -38,7 +39,7 @@ def book_email_triage_proposal(
     if now.time() < time(8, 0):
         return _blocked(idempotency_key=idempotency_key, reason="email_triage_not_before_morning")
 
-    proposals = build_email_triage_proposals(
+    proposals = proposal_payload or build_email_triage_proposals(
         planning_date=planning_day,
         hours=hours,
         limit=limit,

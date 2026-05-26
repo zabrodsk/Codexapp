@@ -240,6 +240,7 @@ def run_email_triage_scheduler(
             ledger_path=ledger_path,
             helper_payload=helper_payload,
             existing_events=existing_events,
+            proposal_payload=proposals,
             health_payload=health,
             now_local=now,
         )

@@ -101,6 +101,44 @@ def test_email_triage_book_calls_writer_for_selected_proposal(tmp_path):
     assert create.call_args.kwargs["metadata_extra"]["attention_count"] == 1
 
 
+def test_email_triage_book_can_use_scheduler_proposal_snapshot(tmp_path):
+    proposal_payload = build_email_triage_proposals(
+        planning_date="2026-05-25",
+        helper_payload=_helper_payload(),
+        existing_events=[],
+        ledger_path=tmp_path / "assistant_audit.jsonl",
+        now_local="2026-05-25T09:30:00+02:00",
+    )
+    key = proposal_payload["idempotency_key"]
+    with patch(
+        "email_triage_live_booking.build_email_triage_proposals",
+        side_effect=AssertionError("should not rebuild email proposal"),
+    ), patch(
+        "email_triage_live_booking.create_calendar_block",
+        return_value={
+            "status": "created",
+            "reason": None,
+            "audit_id": "audit-created",
+            "calendar_write_attempted": True,
+            "calendar_event_created": True,
+            "calendar_event_deleted": False,
+        },
+    ):
+        payload = book_email_triage_proposal(
+            idempotency_key=key,
+            planning_date="2026-05-25",
+            live=True,
+            proposal_payload=proposal_payload,
+            existing_events=[],
+            health_payload={"status": "ok"},
+            ledger_path=tmp_path / "assistant_audit.jsonl",
+            now_local="2026-05-25T09:30:00+02:00",
+        )
+
+    assert payload["status"] == "created"
+    assert payload["idempotency_key"] == key
+
+
 def test_email_triage_book_duplicate_skips_writer(tmp_path):
     duplicate_event = {
         "summary": "Rocky: Email triage - unread attention",

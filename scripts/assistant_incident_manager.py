@@ -248,6 +248,12 @@ def _process_incident(
         state.update_dead_letter_status(dead_letter_id, status)
         _audit_incident("assistant.incident_waiting_for_user", item, result, scheduler_db_path=scheduler_db_path, ledger_path=ledger_path, decision="observed", write_audit=write_audit)
         return _incident_summary(state.get_dead_letter(dead_letter_id) or item, action="asked_for_guidance", notification=result)
+    if job_name == "email_triage_booking" and failure_class == "email_triage_proposal_not_found":
+        result = _notify_email_triage_proposal_not_found(item, scheduler_db_path=scheduler_db_path, ledger_path=ledger_path, channel_id=channel_id, fallback_email=fallback_email, notification_dry_run=notification_dry_run, post_func=post_func, agentmail_send_func=agentmail_send_func, now_local=now_local)
+        status = "waiting_for_user" if result.get("status") in {"posted", "dry_run"} else "open"
+        state.update_dead_letter_status(dead_letter_id, status)
+        _audit_incident("assistant.incident_waiting_for_user", item, result, scheduler_db_path=scheduler_db_path, ledger_path=ledger_path, decision="observed", write_audit=write_audit)
+        return _incident_summary(state.get_dead_letter(dead_letter_id) or item, action="asked_for_guidance", notification=result)
     if job_name == "email_triage_booking" and failure_class == "launchagent_nonzero_exit":
         if _has_related_email_no_slot_guidance(state):
             after = state.update_dead_letter_status(dead_letter_id, "recovered")
@@ -357,6 +363,55 @@ def _notify_email_triage_no_slot(item: dict[str, Any], **kwargs: Any) -> dict[st
         message=message,
         subject=f"Rocky needs guidance: email triage no slot - {target_date}",
         reason="email_triage_no_available_slot_guidance_needed",
+        target_date=target_date,
+        idempotency_key=str(item.get("idempotency_key") or ""),
+        channel_id=kwargs["channel_id"],
+        fallback_email=kwargs["fallback_email"],
+        ledger_path=kwargs.get("ledger_path"),
+        scheduler_db_path=kwargs.get("scheduler_db_path"),
+        dry_run=kwargs["notification_dry_run"],
+        post_func=kwargs.get("post_func"),
+        agentmail_send_func=kwargs.get("agentmail_send_func"),
+    )
+
+
+def _notify_email_triage_proposal_not_found(item: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+    today = _local_today(kwargs.get("now_local"))
+    target_date = _date_from_item(item, default_date=today)
+    if target_date == today:
+        heading = f"Rocky could not finalize email triage for today ({today})."
+        retry_line = "1. Let Rocky retry email triage now using the current unread-mail signal and 15-30 minute chunks."
+        skip_line = "3. Skip email triage for today."
+    elif target_date < today:
+        heading = f"Rocky could not finalize email triage for {target_date}."
+        retry_line = f"1. Let Rocky treat this as catch-up triage today ({today}) using 15-30 minute chunks."
+        skip_line = f"3. Skip/acknowledge the {target_date} email triage incident."
+    else:
+        heading = f"Rocky could not finalize email triage for {target_date}."
+        retry_line = "1. Let Rocky retry on the target date using the current unread-mail signal and 15-30 minute chunks."
+        skip_line = f"3. Skip/acknowledge the {target_date} email triage incident."
+    message = "\n".join(
+        [
+            heading,
+            f"Today is {today}.",
+            "",
+            "Reason: the unread-mail proposal changed between planning and live booking, so Rocky refused to book a stale calendar block.",
+            "What Rocky did: stopped before writing Calendar and recorded the incident.",
+            "What changed: future runs now pass the approved proposal snapshot into booking so this specific mismatch should not recur.",
+            "",
+            "Please choose one:",
+            retry_line,
+            "2. Book the next allowed Monday-Thursday slot.",
+            skip_line,
+            "",
+            f"Incident: {item.get('dead_letter_id')}",
+        ]
+    )
+    return dispatch_user_notification(
+        workflow="email_triage_scheduler",
+        message=message,
+        subject=f"Rocky needs guidance: email triage proposal changed - {target_date}",
+        reason="email_triage_proposal_changed_guidance_needed",
         target_date=target_date,
         idempotency_key=str(item.get("idempotency_key") or ""),
         channel_id=kwargs["channel_id"],

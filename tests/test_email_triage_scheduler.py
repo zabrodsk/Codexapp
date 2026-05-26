@@ -145,3 +145,31 @@ def test_writer_failure_dead_letters_and_notification_dry_run(tmp_path):
     assert payload["notification"]["status"] == "dry_run"
     rendered = json.dumps(payload)
     assert "Secret" not in rendered
+
+
+def test_scheduler_passes_proposal_snapshot_to_live_booking(tmp_path):
+    with patch(
+        "email_triage_scheduler.book_email_triage_proposal",
+        return_value={
+            "status": "created",
+            "reason": None,
+            "idempotency_key": "rocky:email:test",
+            "calendar_write_attempted": True,
+            "calendar_event_created": True,
+            "calendar_event_deleted": False,
+        },
+    ) as book:
+        payload = run_email_triage_scheduler(
+            planning_date="2026-05-25",
+            helper_payload=_helper_payload(),
+            existing_events=[],
+            live=True,
+            health_payload={"status": "ok"},
+            now_local="2026-05-25T09:30:00+02:00",
+            **_paths(tmp_path),
+        )
+
+    assert payload["status"] == "created"
+    book.assert_called_once()
+    assert book.call_args.kwargs["proposal_payload"]["status"] == "proposal"
+    assert book.call_args.kwargs["proposal_payload"]["idempotency_key"] == payload["idempotency_key"]
