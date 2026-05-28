@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ctm-buzz-mcp"
+version = "0.1.0"
+description = "MCP server for the Agilix Buzz LMS at ctm.agilixbuzz.com"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.26.0",
+    "requests>=2.31.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+ctm-buzz-mcp = "ctm_buzz_mcp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
